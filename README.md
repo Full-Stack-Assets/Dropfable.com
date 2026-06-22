@@ -149,6 +149,3 @@ Ensure `npm run build` generated `dist/server.cjs`, then run `npm run start`.
 
 ---
 
-## Notes
-
-This README has been updated from the initial AI Studio starter template to reflect the current DropKit repository setup and scripts.
