@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 256" width="1180" height="256" role="img" aria-label="Nichesmith">
+  <title>Nichesmith logo</title>
+  <g transform="translate(8,8) scale(0.46875)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="#1A7A4F"/>
+    <path d="M176 344 L176 168 L336 344 L336 168" fill="none" stroke="#FFFFFF" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M396 116 C399 140 406 147 430 150 C406 153 399 160 396 184 C393 160 386 153 362 150 C386 147 393 140 396 116 Z" fill="#A7E3C4"/>
+  </g>
+  <text x="276" y="172" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="132" font-weight="600" letter-spacing="-3" fill="#14532D">Nichesmith</text>
+</svg>
