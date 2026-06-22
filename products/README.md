@@ -17,6 +17,18 @@ add a branded cover, export a PDF, and upload that PDF as the digital download.
 listing both singles plus a discounted 2-pack lets buyers self-select up and
 encourages each to recommend the other pack to their partner.
 
+## Listing covers
+
+Ready-to-use preview images in [`covers/`](./covers/) (1600×1200, 4:3, built from
+[../BRAND.md](../BRAND.md)). Open an SVG in a browser or Canva and export to PNG
+at 2x before uploading as the product preview.
+
+| Cover | For |
+| --- | --- |
+| `covers/realtor-cover.svg` | Real Estate Agent pack |
+| `covers/loan-officer-cover.svg` | Loan Officer pack |
+| `covers/bundle-cover.svg` | Real Estate + Mortgage bundle (hero) |
+
 **Next in the line (same format, ~1 hr each):** Property Manager, Insurance Agent,
 Real Estate Investor, Med Spa / Dental practice. See [../NICHES.md](../NICHES.md)
 for the validated niche logic and [../GTM.md](../GTM.md) for the launch plan.
