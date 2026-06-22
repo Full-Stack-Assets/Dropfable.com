@@ -117,6 +117,11 @@ const LOADER_MESSAGES = [
   "Preparing final delivery payload..."
 ];
 
+// Persisted archive key. Renamed from the legacy "dropkit_archive"; existing
+// archives are migrated to the new key on first load (see effect in App()).
+const ARCHIVE_KEY = "nichesmith_archive";
+const LEGACY_ARCHIVE_KEY = "dropkit_archive";
+
 export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<ProductType>(PRODUCTS[0]);
   const [niche, setNiche] = useState("");
@@ -239,7 +244,7 @@ export default function App() {
   };
 
   const handleCopyArchiveJSON = () => {
-    const dataStr = localStorage.getItem('dropkit_archive');
+    const dataStr = localStorage.getItem(ARCHIVE_KEY);
     if (!dataStr) {
       alert("Archive is empty.");
       return;
@@ -248,7 +253,7 @@ export default function App() {
   };
 
   const handleBackupArchive = () => {
-    const dataStr = localStorage.getItem('dropkit_archive');
+    const dataStr = localStorage.getItem(ARCHIVE_KEY);
     if (!dataStr) {
       alert("Archive is empty.");
       return;
@@ -275,7 +280,7 @@ export default function App() {
             const data = JSON.parse(e.target.result as string);
             if (Array.isArray(data)) {
               setArchivedItems(data);
-              localStorage.setItem('dropkit_archive', JSON.stringify(data));
+              localStorage.setItem(ARCHIVE_KEY, JSON.stringify(data));
               alert("Backup restored successfully.");
             } else {
               alert("Invalid backup file format.");
@@ -294,7 +299,15 @@ export default function App() {
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem('dropkit_archive');
+    let saved = localStorage.getItem(ARCHIVE_KEY);
+    // One-time migration from the pre-rename key so saved archives survive.
+    if (!saved) {
+      const legacy = localStorage.getItem(LEGACY_ARCHIVE_KEY);
+      if (legacy) {
+        localStorage.setItem(ARCHIVE_KEY, legacy);
+        saved = legacy;
+      }
+    }
     if (saved) {
       try { setArchivedItems(JSON.parse(saved)); } catch (e) {}
     }
@@ -305,14 +318,14 @@ export default function App() {
     if (!isAlreadySaved) {
       const updated = [...archivedItems, item];
       setArchivedItems(updated);
-      localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
     }
   };
 
   const handleRemoveFromArchive = (index: number) => {
     const updated = archivedItems.filter((_, i) => i !== index);
     setArchivedItems(updated);
-    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
     setSelectedArchiveIndices(prev => prev.filter(i => i !== index).map(i => i > index ? i - 1 : i));
   };
 
@@ -680,7 +693,7 @@ ${item.productContent}
 
     updated[index] = { ...oldItem, productTitle: newTitle, versions: newVersions };
     setArchivedItems(updated);
-    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
     setEditTitleIndex(null);
   };
 
@@ -702,7 +715,7 @@ ${item.productContent}
 
     updated[archiveIndex] = { ...oldItem, productTitle: versionToRestore.productTitle, versions: newVersions };
     setArchivedItems(updated);
-    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
   };
 
   const handleFetchTrends = async () => {
@@ -743,7 +756,7 @@ ${item.productContent}
         const newArchived = [...archivedItems];
         newArchived[index] = updatedItem;
         setArchivedItems(newArchived);
-        localStorage.setItem('dropkit_archive', JSON.stringify(newArchived));
+        localStorage.setItem(ARCHIVE_KEY, JSON.stringify(newArchived));
       } else {
         const newBatch = [...batchResults];
         newBatch[index] = updatedItem;
@@ -830,7 +843,7 @@ ${item.productContent}
           <div className="flex items-center gap-8">
             <div className="text-[10px] sm:text-xs tracking-[0.4em] font-medium uppercase text-white/90 flex items-center gap-4">
               <span>Full Stack Assets</span>
-              <span className="text-white/30 hidden sm:inline">/ The Factory</span>
+              <span className="text-white/30 hidden sm:inline">/ Nichesmith</span>
             </div>
             {/* Trending Niche Intensity Sparkline */}
             <div className="hidden lg:flex flex-col w-24 opacity-80 border-l border-bord pl-6 ml-2">

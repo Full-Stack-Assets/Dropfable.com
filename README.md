@@ -1,6 +1,6 @@
-# DropKit — the digital product factory
+# Nichesmith — the digital product factory
 
-DropKit turns a niche or audience into a complete, ready-to-sell digital product
+Nichesmith turns a niche or audience into a complete, ready-to-sell digital product
 **and** the sales copy to sell it. Pick a product type, type in an audience, and
 Google Gemini generates the full product plus optimized Etsy/Gumroad listings.
 Everything can be exported, archived locally, and pushed to Notion or Shopify.

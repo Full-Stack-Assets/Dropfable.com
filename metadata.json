@@ -1,5 +1,5 @@
 {
-  "name": "DropKit",
+  "name": "Nichesmith",
   "description": "A digital product factory that generates complete high-value planners, prompt packs, guides, and checklist systems for any niche, plus the Etsy and Gumroad sales copy to sell them.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

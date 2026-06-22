@@ -2,9 +2,9 @@
 
 Guidance for AI assistants (and humans) working in this repository.
 
-## What DropKit is
+## What Nichesmith is
 
-DropKit is a **digital product factory**. Given a niche/audience, it uses Google
+Nichesmith is a **digital product factory**. Given a niche/audience, it uses Google
 Gemini to generate complete, ready-to-sell digital products — planners, AI prompt
 packs, template packs, mini-guides, checklist systems, swipe files, and website
 copy — along with the matching Etsy/Gumroad sales copy (titles, tags, pricing,
@@ -84,7 +84,9 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - `ManufactureResult` (in `src/App.tsx`) is the canonical shape returned by
   `/api/manufacture` and stored in the archive. If you change the response schema in
   `server.ts`, update this interface too.
-- The **archive** persists to `localStorage` under the key **`dropkit_archive`**.
+- The **archive** persists to `localStorage` under the key **`nichesmith_archive`**
+  (the constant `ARCHIVE_KEY`; the legacy `dropkit_archive` key is migrated on first
+  load).
   Helpers handle save/remove/import/backup/version history — keep all reads/writes
   going through that single key.
 
