@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { Client as NotionClient } from "@notionhq/client";
+import { PRODUCT_DEFS } from "./src/products";
 
 dotenv.config();
 
@@ -25,25 +26,15 @@ const ai = new GoogleGenAI({
   },
 });
 
-const specMap: Record<string, string> = {
-  planner: "a premium 30-day planner/workbook: featuring an engaging intro page, a clear 'how-to-use' layout, 30 beautifully detailed daily pages (each with an inspiring daily theme, 2-3 specific reflective prompts or input fields, and a daily actionable microscopic step), a recurring weekly review section (every 7 days, so total of 4 reviews), and a final comprehensive reflection page. Do not hold back, provide the complete content for each of the 30 days.",
-  prompts: "a pack of 50 extremely high-value, ready-to-use AI prompts sorted into 5 sensible categories of 10 prompts each. Each prompt includes a distinct bold title, the complete, ready-to-copy-paste prompt with placeholder [VARIABLES] in brackets, and a brief 1-line usage tip ('Use this when...'). Also provide a 1-paragraph quick-start overview at the beginning.",
-  templates: "a system of 25 fill-in-the-blank communication templates (emails, outreach scripts, captions, or follow-up messages depending on what fits this niche best) across 5 thematic categories. Each template must feature a clear header/title, the core copy-paste template text with clear [BLANK] blocks to fill, and a stellar usage tip.",
-  guide: "a complete deep-dive mini-guide (~2,000-3,000 words): full title page details, an introduction, 6-8 comprehensive chapters filled with extremely actionable specifics, real-world numbers, checklists, examples, and a strong conclusion with defined next steps. Write the FULL text, not an outline.",
-  checklist: "an actionable set of 10 related checklists suitable for this niche. Provide a master table or index of 'which checklist to use when', followed by the 10 checklists. Each checklist must have a descriptive title, context of when to use it, and 8-15 ordered, highly detailed actionable bullet points/checkbox tasks.",
-  swipe: "a premium swipe file comprising 75 ready-to-use subject lines, titles, hook formulas, or captions (customized for the niche) across 5 themed categories of 15 items. Each category includes a brief intro note explaining why and when these mental hooks work best.",
-  website: "a comprehensive 5-page website wireframe and copy generator, providing exact headline copy, sub-headlines, body text, call-to-actions, and structural layouts for: Homepage, About Us, Services/Products, Testimonials, and Contact pages, all perfectly tailored to the requested niche."
-};
+// Derived from the shared product catalog so ids/labels/specs stay in sync with
+// the frontend (see src/products.ts).
+const specMap: Record<string, string> = Object.fromEntries(
+  PRODUCT_DEFS.map((p) => [p.id, p.spec])
+);
 
-const labelsMap: Record<string, string> = {
-  planner: "Planner / Workbook",
-  prompts: "AI Prompt Pack",
-  templates: "Template Pack",
-  guide: "Mini-Guide / Book",
-  checklist: "Checklist System",
-  swipe: "Swipe File",
-  website: "Website Generator"
-};
+const labelsMap: Record<string, string> = Object.fromEntries(
+  PRODUCT_DEFS.map((p) => [p.id, p.label])
+);
 
   app.post("/api/manufacture", async (req, res) => {
     try {

@@ -58,14 +58,26 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 ### Backend API endpoints (all in `server.ts`)
 
 - `POST /api/manufacture` — main generator. Body: `{ productId, niche, angle, language }`.
-  Uses `specMap`/`labelsMap` + a JSON `responseSchema` to return the product plus
-  sales copy. **`specMap`/`labelsMap` in `server.ts` must stay in sync** with the
-  `PRODUCTS` array in `src/App.tsx` (same `id`s: `planner`, `prompts`, `templates`,
-  `guide`, `checklist`, `swipe`, `website`).
+  Uses `specMap`/`labelsMap` (both derived from the shared catalog) + a JSON
+  `responseSchema` to return the product plus sales copy.
 - `GET /api/trends` — returns 5 trending niche strings.
 - `POST /api/image/generate` — generates a cover image (returns a base64 data URL).
 - `POST /api/notion/push` — converts product text to Notion blocks and creates a page.
 - `POST /api/shopify/push` — creates a product via the Shopify GraphQL Admin API.
+
+### Shared product catalog
+
+- **`src/products.ts`** is the single source of truth for the product types. It
+  exports `PRODUCT_DEFS` (`id`, `label`, `code`, `blurb`, `spec`) and is imported
+  by **both** the frontend (`src/App.tsx`) and the backend (`server.ts`):
+  - `server.ts` derives `specMap` (`id → spec`, the full Gemini spec) and
+    `labelsMap` (`id → label`) from it.
+  - `src/App.tsx` builds its `PRODUCTS` array from it, attaching the lucide icon
+    per `id` via the local `PRODUCT_ICONS` map (icons are UI-only). The UI's
+    `name`/`spec` fields map to the catalog's `label`/`blurb`.
+- Keep `products.ts` **React-/JSX-free** — it is bundled into the Node server
+  build by esbuild. Product ids are: `planner`, `prompts`, `templates`, `guide`,
+  `checklist`, `swipe`, `website`.
 
 ### Frontend data model
 
@@ -81,15 +93,20 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - **TypeScript path alias:** `@/*` maps to the repo root (configured in both
   `tsconfig.json` and `vite.config.ts`).
 - **Styling:** Tailwind utility classes + the custom theme tokens in
-  `src/index.css`. Note the theme is a **dark** theme even though tokens are named
-  `--color-cream`, `--color-amber`, etc. (they map to dark values). Use the named
-  tokens (`bg-cream`, `text-ink`, `border-bord`, ...) rather than hardcoding colors.
+  `src/index.css` (`@theme`). It is a **dark** theme; tokens are named by role:
+  `--color-base` (app background), `--color-surface` (panels/cards/inputs),
+  `--color-elevated` (raised/hover), `--color-ink` (primary text), `--color-mut`
+  (muted text), `--color-bord` (hairline borders). Use the named utilities
+  (`bg-base`, `bg-surface`, `text-ink`, `border-bord`, `text-mut`, ...) rather
+  than hardcoding hex values like `bg-[#0A0A0A]`. Document/export-only colors
+  (PDF, HTML export, recharts) are plain strings in JS and are exempt.
 - **Icons:** import from `lucide-react`.
 - **Do not modify the HMR / file-watch settings** in `vite.config.ts`. They are
   intentionally gated on `DISABLE_HMR` to prevent flickering during AI Studio agent
   edits.
-- When adding a new product type, update **both** `PRODUCTS` (in `src/App.tsx`) and
-  `specMap` + `labelsMap` (in `server.ts`) using the same `id`.
+- When adding a new product type, add one entry to `PRODUCT_DEFS` in
+  `src/products.ts` and one icon to `PRODUCT_ICONS` in `src/App.tsx` (same `id`).
+  `server.ts` and the UI catalog pick it up automatically — no other edits needed.
 
 ## Environment variables
 
