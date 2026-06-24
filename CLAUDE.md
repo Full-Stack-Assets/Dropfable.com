@@ -58,6 +58,22 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   files or a `components/` directory yet. `src/main.tsx` mounts it and calls
   `inject()` from `@vercel/analytics` to enable Vercel Web Analytics.
 
+### Deployment
+
+- **Standalone Node (default):** `npm run build` then `npm run start` runs
+  `dist/server.cjs`, the bundled Express server, which serves the static `dist/`
+  frontend and the `/api/*` routes from one process. This is the model the
+  `dev`/`build`/`start` scripts target.
+- **Vercel:** `server.ts` exports the configured Express `app` as its default
+  export. `api/[...path].ts` re-exports it as a serverless function, and
+  `vercel.json` builds the frontend (`vite build` → `dist/`), routes `/api/*` to
+  that function, and rewrites everything else to `index.html` (SPA). `server.ts`
+  detects Vercel via `process.env.VERCEL` and **skips** its own
+  `app.listen()`/Vite bootstrap there. Vite is imported dynamically (dev only) so
+  it never lands in the production bundle or the Vercel function trace.
+  **Set `GEMINI_API_KEY` (and any Notion/Shopify vars) in the Vercel project's
+  Environment Variables** — without them the API returns JSON errors.
+
 ### Backend API endpoints (all in `server.ts`)
 
 - `POST /api/manufacture` — main generator. Body: `{ productId, niche, angle, language }`.

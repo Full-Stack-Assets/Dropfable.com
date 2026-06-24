@@ -117,6 +117,22 @@ const LOADER_MESSAGES = [
   "Preparing final delivery payload..."
 ];
 
+// Safely read a fetch Response as JSON. When the backend is unreachable or
+// returns a non-JSON body (e.g. an HTML error/redirect/login page), the native
+// Response.json() throws a cryptic, browser-specific SyntaxError — on iOS
+// Safari this reads "The string did not match the expected pattern." Reading the
+// body as text first lets us surface an actionable message instead.
+async function parseJsonResponse(res: Response): Promise<any> {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      `The server returned an unexpected response (HTTP ${res.status}). The API may be unavailable — please try again.`
+    );
+  }
+}
+
 export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<ProductType>(PRODUCTS[0]);
   const [niche, setNiche] = useState("");
@@ -621,7 +637,7 @@ ${item.productContent}
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         alert("Notion Push Failed: " + (data.error || "Unknown error"));
       } else {
@@ -647,7 +663,7 @@ ${item.productContent}
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         alert("Shopify Push Failed: " + (data.error || "Unknown error"));
       } else {
@@ -709,7 +725,7 @@ ${item.productContent}
     setIsFetchingTrends(true);
     try {
       const res = await fetch("/api/trends");
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (data.trends && data.trends.length > 0) {
          setSuggestions(data.trends);
       }
@@ -732,7 +748,7 @@ ${item.productContent}
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         throw new Error(data.error || "Failed to generate image");
       }
@@ -799,7 +815,7 @@ ${item.productContent}
             }),
           });
 
-          const data = await response.json();
+          const data = await parseJsonResponse(response);
 
           if (!response.ok) {
             throw new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${currentProduct.name})`);
