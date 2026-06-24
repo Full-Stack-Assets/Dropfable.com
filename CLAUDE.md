@@ -25,7 +25,9 @@ in that hosted environment.
   `gemini-2.5-flash-image`.
 - **Key libraries:** `motion` (animations), `jspdf` (PDF export),
   `react-markdown`, `recharts` (trend sparklines), `qrcode.react`,
-  `lucide-react` (icons), `@notionhq/client` (Notion push).
+  `lucide-react` (icons), `@notionhq/client` (Notion push),
+  `@vercel/analytics` (web analytics — `inject()` is called once in
+  `src/main.tsx`).
 
 ## Commands
 
@@ -51,9 +53,26 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   **no separate `vite dev` process**. In production (`NODE_ENV=production`) it
   serves the static `dist/` build and falls back to `dist/index.html` for SPA
   routing.
-- **`src/App.tsx`** (~2400 lines) is the entire frontend — one large default-export
+- **`src/App.tsx`** (~2375 lines) is the entire frontend — one large default-export
   `App()` component holding all state via `useState`. There are no sub-component
-  files or a `components/` directory yet. `src/main.tsx` just mounts it.
+  files or a `components/` directory yet. `src/main.tsx` mounts it and calls
+  `inject()` from `@vercel/analytics` to enable Vercel Web Analytics.
+
+### Deployment
+
+- **Standalone Node (default):** `npm run build` then `npm run start` runs
+  `dist/server.cjs`, the bundled Express server, which serves the static `dist/`
+  frontend and the `/api/*` routes from one process. This is the model the
+  `dev`/`build`/`start` scripts target.
+- **Vercel:** `server.ts` exports the configured Express `app` as its default
+  export. `api/[...path].ts` re-exports it as a serverless function, and
+  `vercel.json` builds the frontend (`vite build` → `dist/`), routes `/api/*` to
+  that function, and rewrites everything else to `index.html` (SPA). `server.ts`
+  detects Vercel via `process.env.VERCEL` and **skips** its own
+  `app.listen()`/Vite bootstrap there. Vite is imported dynamically (dev only) so
+  it never lands in the production bundle or the Vercel function trace.
+  **Set `GEMINI_API_KEY` (and any Notion/Shopify vars) in the Vercel project's
+  Environment Variables** — without them the API returns JSON errors.
 
 ### Backend API endpoints (all in `server.ts`)
 

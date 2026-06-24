@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 import { Client as NotionClient } from "@notionhq/client";
 import { PRODUCT_DEFS } from "./src/products";
 
@@ -346,9 +345,17 @@ app.post("/api/image/generate", async (req, res) => {
   }
 });
 
-// Setup Vite Dev Middleware / Static files serving
+// Standalone server bootstrap: Vite dev middleware (dev) or static dist/ serving
+// (production `node dist/server.cjs`) + listen(). On Vercel the app runs as a
+// serverless function (see api/[...path].ts) which imports the exported `app`
+// directly, so this bootstrap is skipped — Vercel serves the static frontend
+// and routes /api/* to the function (see vercel.json).
 async function mountViteMiddleware() {
   if (process.env.NODE_ENV !== "production") {
+    // Dynamic import via a variable specifier so Vite (a devDependency) is never
+    // pulled into the production esbuild bundle or the Vercel function trace.
+    const viteSpecifier = "vite";
+    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -367,4 +374,10 @@ async function mountViteMiddleware() {
   });
 }
 
-mountViteMiddleware();
+// Vercel sets process.env.VERCEL; in that case the app is consumed as a
+// serverless handler and must not call listen().
+if (!process.env.VERCEL) {
+  mountViteMiddleware();
+}
+
+export default app;
