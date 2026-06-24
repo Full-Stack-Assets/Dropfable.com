@@ -25,7 +25,9 @@ in that hosted environment.
   `gemini-2.5-flash-image`.
 - **Key libraries:** `motion` (animations), `jspdf` (PDF export),
   `react-markdown`, `recharts` (trend sparklines), `qrcode.react`,
-  `lucide-react` (icons), `@notionhq/client` (Notion push).
+  `lucide-react` (icons), `@notionhq/client` (Notion push),
+  `@vercel/analytics` (web analytics — `inject()` is called once in
+  `src/main.tsx`).
 
 ## Commands
 
@@ -51,9 +53,10 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   **no separate `vite dev` process**. In production (`NODE_ENV=production`) it
   serves the static `dist/` build and falls back to `dist/index.html` for SPA
   routing.
-- **`src/App.tsx`** (~2400 lines) is the entire frontend — one large default-export
+- **`src/App.tsx`** (~2375 lines) is the entire frontend — one large default-export
   `App()` component holding all state via `useState`. There are no sub-component
-  files or a `components/` directory yet. `src/main.tsx` just mounts it.
+  files or a `components/` directory yet. `src/main.tsx` mounts it and calls
+  `inject()` from `@vercel/analytics` to enable Vercel Web Analytics.
 
 ### Backend API endpoints (all in `server.ts`)
 
