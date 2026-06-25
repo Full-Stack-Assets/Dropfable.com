@@ -48,18 +48,25 @@ function isRetriableGeminiError(err: unknown): boolean {
 }
 
 // generateContent with model fallback + light backoff. Tries each model in
-// TEXT_MODELS, retrying transient/overload errors twice before moving to the
-// next model. Non-retriable errors (e.g. a malformed request) fail fast.
+// TEXT_MODELS up to ATTEMPTS_PER_MODEL times, retrying transient/overload errors
+// before moving to the next model. Non-retriable errors (e.g. a malformed
+// request) fail fast.
+const ATTEMPTS_PER_MODEL = 2;
+
 async function generateText(params: { contents: any; config?: any }) {
   let lastErr: unknown;
   for (const model of TEXT_MODELS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < ATTEMPTS_PER_MODEL; attempt++) {
       try {
         return await ai.models.generateContent({ model, ...params });
       } catch (err) {
         lastErr = err;
         if (!isRetriableGeminiError(err)) throw err;
-        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        // Only back off when another attempt remains on this model; otherwise
+        // fall through to the next model immediately.
+        if (attempt < ATTEMPTS_PER_MODEL - 1) {
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        }
       }
     }
   }
