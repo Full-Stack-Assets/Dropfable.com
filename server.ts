@@ -406,7 +406,7 @@ async function mountViteMiddleware() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`DropKit Digital Factory active on http://0.0.0.0:${PORT}`);
+    console.log(`Nichesmith Digital Factory active on http://0.0.0.0:${PORT}`);
   });
 }
 

@@ -1,4 +1,4 @@
-// Shared product catalog — the single source of truth for DropKit's product
+// Shared product catalog — the single source of truth for Nichesmith's product
 // types. Imported by BOTH the frontend (`src/App.tsx`) and the backend
 // (`server.ts`) so ids, labels and specs never drift out of sync.
 //

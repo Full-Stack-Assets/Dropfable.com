@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1200" width="1600" height="1200" role="img" aria-label="Real Estate plus Mortgage AI Prompt Pack Bundle cover">
+  <title>Real Estate + Mortgage AI Prompt Pack Bundle — listing cover</title>
+  <rect width="1600" height="1200" fill="#F7F8F7"/>
+  <rect x="0" y="0" width="1600" height="14" fill="#1A7A4F"/>
+
+  <!-- brand lockup (top-left) -->
+  <g transform="translate(100,92)">
+    <g transform="scale(0.21)">
+      <rect x="16" y="16" width="480" height="480" rx="112" fill="#1A7A4F"/>
+      <path d="M176 344 L176 168 L336 344 L336 168" fill="none" stroke="#FFFFFF" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M396 116 C399 140 406 147 430 150 C406 153 399 160 396 184 C393 160 386 153 362 150 C386 147 393 140 396 116 Z" fill="#A7E3C4"/>
+    </g>
+    <text x="128" y="74" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="600" letter-spacing="3" fill="#5B6660">NICHESMITH</text>
+  </g>
+
+  <!-- value badge (top-right) -->
+  <rect x="1240" y="92" width="260" height="86" rx="43" fill="#14532D"/>
+  <text x="1370" y="148" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="2" fill="#FFFFFF">SAVE $9</text>
+
+  <!-- badge -->
+  <rect x="540" y="300" width="520" height="74" rx="37" fill="#1A7A4F"/>
+  <text x="800" y="349" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="700" letter-spacing="3" fill="#FFFFFF">100 AI PROMPTS · 2 PACKS</text>
+
+  <!-- headline -->
+  <text x="800" y="540" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="128" font-weight="700" letter-spacing="-4" fill="#14532D">Real Estate +</text>
+  <text x="800" y="672" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="128" font-weight="700" letter-spacing="-4" fill="#14532D">Mortgage</text>
+
+  <!-- subhead -->
+  <text x="800" y="782" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="60" font-weight="600" fill="#111111">AI Prompt Pack Bundle</text>
+  <rect x="730" y="820" width="140" height="8" rx="4" fill="#1A7A4F"/>
+
+  <!-- contents line -->
+  <text x="800" y="940" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="36" font-weight="400" fill="#5B6660">Realtor pack + Loan Officer pack · everything to market both sides</text>
+
+  <!-- footer -->
+  <text x="800" y="1110" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="500" fill="#5B6660">For ChatGPT · Gemini · Claude</text>
+</svg>
