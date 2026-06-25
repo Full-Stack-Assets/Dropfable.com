@@ -35,12 +35,12 @@ const labelsMap: Record<string, string> = Object.fromEntries(
   PRODUCT_DEFS.map((p) => [p.id, p.label])
 );
 
-// Text-generation models in priority order. The original `gemini-3.5-flash`
-// returns persistent 503 "high demand" / UNAVAILABLE for this key, so we lead
-// with the GA flash models (the 2.5 family is provisioned — cover images use
-// gemini-2.5-flash-image) and fall through to the next model on transient,
-// overload, or quota errors.
-const TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash"];
+// Text-generation models in priority order, fastest first. gemini-2.5-flash-lite
+// is the lowest-latency Flash model; if it is unavailable or overloaded we fall
+// back to the fuller gemini-2.5-flash, then gemini-2.0-flash. (The original
+// gemini-3.5-flash returned persistent 503 "high demand" / UNAVAILABLE for this
+// key; the 2.5 family is provisioned — cover images use gemini-2.5-flash-image.)
+const TEXT_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"];
 
 function isRetriableGeminiError(err: unknown): boolean {
   const msg = String((err as any)?.message ?? err);
