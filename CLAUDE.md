@@ -21,8 +21,9 @@ in that hosted environment.
   `@tailwindcss/vite`, configured in `src/index.css` with `@theme`, **not** a
   `tailwind.config.js`).
 - **Backend:** Express 4 in a single `server.ts`, run with `tsx` in dev.
-- **AI:** `@google/genai` (Gemini). Text uses `gemini-3.5-flash`; cover images use
-  `gemini-2.5-flash-image`.
+- **AI:** `@google/genai` (Gemini). Text generation tries `gemini-2.5-flash-lite`
+  → `gemini-2.5-flash` → `gemini-2.0-flash` (a fallback/retry chain in
+  `server.ts`'s `generateText`); cover images use `gemini-2.5-flash-image`.
 - **Key libraries:** `motion` (animations), `jspdf` (PDF export), `jszip`
   (bundles the archive into a downloadable ZIP), `react-markdown`,
   `recharts` (trend sparklines), `qrcode.react`, `lucide-react` (icons),
@@ -64,10 +65,12 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   `dist/server.cjs`, the bundled Express server, which serves the static `dist/`
   frontend and the `/api/*` routes from one process. This is the model the
   `dev`/`build`/`start` scripts target.
-- **Vercel:** `server.ts` exports the configured Express `app` as its default
-  export. `api/[...path].ts` re-exports it as a serverless function, and
-  `vercel.json` builds the frontend (`vite build` → `dist/`), routes `/api/*` to
-  that function, and rewrites everything else to `index.html` (SPA). `server.ts`
+- **Vercel:** `server.ts` is pre-bundled to a self-contained `server.generated.cjs`
+  (esbuild, via the `buildCommand`) and `api/index.ts` loads it and re-exports the
+  Express `app` as a serverless function. `vercel.json` builds the frontend
+  (`vite build` → `dist/`), routes `/api/*` to that function (an explicit
+  `/api/(.*)` rewrite — nested paths like `/api/image/generate` must match), and
+  rewrites everything else to `index.html` (SPA). `server.ts`
   detects Vercel via `process.env.VERCEL` and **skips** its own
   `app.listen()`/Vite bootstrap there. Vite is imported dynamically (dev only) so
   it never lands in the production bundle or the Vercel function trace.

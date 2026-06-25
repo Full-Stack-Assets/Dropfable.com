@@ -124,6 +124,22 @@ const LOADER_MESSAGES = [
 const ARCHIVE_KEY = "nichesmith_archive";
 const LEGACY_ARCHIVE_KEY = "dropkit_archive";
 
+// Safely read a fetch Response as JSON. When the backend is unreachable or
+// returns a non-JSON body (e.g. an HTML error/redirect/timeout page), the native
+// Response.json() throws a cryptic, browser-specific SyntaxError — on iOS Safari
+// "The string did not match the expected pattern." Reading the body as text
+// first lets us surface an actionable message instead.
+async function parseJsonResponse(res: Response): Promise<any> {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      `The server returned an unexpected response (HTTP ${res.status}). The API may be unavailable — please try again.`
+    );
+  }
+}
+
 export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<ProductType>(PRODUCTS[0]);
   const [niche, setNiche] = useState("");
@@ -861,43 +877,67 @@ ${item.productContent}
     setLoading(true);
     setBatchResults([]);
 
-    try {
-      const newResults: ManufactureResult[] = [];
-      const productsToProcess = generateAllProducts ? PRODUCTS : [selectedProduct];
-      
-      let currentIdx = 0;
-      const totalSteps = nichesToProcess.length * productsToProcess.length;
+    const newResults: ManufactureResult[] = [];
+    const failures: string[] = [];
+    const productsToProcess = generateAllProducts ? PRODUCTS : [selectedProduct];
+    let currentIdx = 0;
+    const totalSteps = nichesToProcess.length * productsToProcess.length;
 
-      for (let i = 0; i < nichesToProcess.length; i++) {
-        const currentNiche = nichesToProcess[i];
-        
-        for (let j = 0; j < productsToProcess.length; j++) {
-          const currentProduct = productsToProcess[j];
-          currentIdx++;
-          setBatchProgress({ current: currentIdx, total: totalSteps });
-
+    // Generate one product, retrying once on a transient failure (e.g. a 504
+    // timeout on a large product). Throws only if both attempts fail.
+    const generateOne = async (productId: string, label: string, currentNiche: string) => {
+      let lastErr: any;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
           const response = await fetch("/api/manufacture", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              productId: currentProduct.id,
+              productId,
               niche: currentNiche,
               angle: angle.trim() || undefined,
               language: language !== "English" ? language : undefined,
             }),
           });
-
           const data = await parseJsonResponse(response);
-
           if (!response.ok) {
-            throw new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${currentProduct.name})`);
+            throw new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${label})`);
           }
-
-          newResults.push({ ...data, originalNiche: currentNiche });
-          setBatchResults([...newResults]);
+          return data;
+        } catch (e: any) {
+          lastErr = e;
         }
+      }
+      throw lastErr;
+    };
+
+    try {
+      for (let i = 0; i < nichesToProcess.length; i++) {
+        const currentNiche = nichesToProcess[i];
+
+        for (let j = 0; j < productsToProcess.length; j++) {
+          const currentProduct = productsToProcess[j];
+          currentIdx++;
+          setBatchProgress({ current: currentIdx, total: totalSteps });
+
+          try {
+            const data = await generateOne(currentProduct.id, currentProduct.name, currentNiche);
+            newResults.push({ ...data, originalNiche: currentNiche });
+            setBatchResults([...newResults]);
+          } catch (e) {
+            // Don't abort the whole run — record the failure and keep going so
+            // one slow/timed-out product doesn't lose the others.
+            failures.push(nichesToProcess.length > 1 ? `${currentProduct.name} (${currentNiche})` : currentProduct.name);
+          }
+        }
+      }
+
+      if (failures.length > 0) {
+        setError(
+          newResults.length === 0
+            ? `Synthesis failed${failures.length > 1 ? " for all items" : ""}. Large products can exceed the time limit — please try again.`
+            : `Generated ${newResults.length} of ${totalSteps}. Click "Drop it" again to retry: ${failures.join(", ")}.`
+        );
       }
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during synthesis.");
