@@ -2,8 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
-import { Client as NotionClient } from "@notionhq/client";
-import { PRODUCT_DEFS } from "./src/products";
+import { createServer as createViteServer } from "vite";
 
 dotenv.config();
 
@@ -25,155 +24,245 @@ const ai = new GoogleGenAI({
   },
 });
 
-// Derived from the shared product catalog so ids/labels/specs stay in sync with
-// the frontend (see src/products.ts).
-const specMap: Record<string, string> = Object.fromEntries(
-  PRODUCT_DEFS.map((p) => [p.id, p.spec])
-);
+const specMap: Record<string, string> = {
+  planner: "a premium 30-day planner/workbook: featuring an engaging intro page, a clear 'how-to-use' layout, 30 beautifully detailed daily pages (each with an inspiring daily theme, 2-3 specific reflective prompts or input fields, and a daily actionable microscopic step), a recurring weekly review section (every 7 days, so total of 4 reviews), and a final comprehensive reflection page. Do not hold back, provide the complete content for each of the 30 days.",
+  prompts: "a pack of 50 extremely high-value, ready-to-use AI prompts sorted into 5 sensible categories of 10 prompts each. Each prompt includes a distinct bold title, the complete, ready-to-copy-paste prompt with placeholder [VARIABLES] in brackets, and a brief 1-line usage tip ('Use this when...'). Also provide a 1-paragraph quick-start overview at the beginning.",
+  templates: "a system of 25 fill-in-the-blank communication templates (emails, outreach scripts, captions, or follow-up messages depending on what fits this niche best) across 5 thematic categories. Each template must feature a clear header/title, the core copy-paste template text with clear [BLANK] blocks to fill, and a stellar usage tip.",
+  guide: "a complete deep-dive mini-guide (~2,000-3,000 words): full title page details, an introduction, 6-8 comprehensive chapters filled with extremely actionable specifics, real-world numbers, checklists, examples, and a strong conclusion with defined next steps. Write the FULL text, not an outline.",
+  checklist: "an actionable set of 10 related checklists suitable for this niche. Provide a master table or index of 'which checklist to use when', followed by the 10 checklists. Each checklist must have a descriptive title, context of when to use it, and 8-15 ordered, highly detailed actionable bullet points/checkbox tasks.",
+  swipe: "a premium swipe file comprising 75 ready-to-use subject lines, titles, hook formulas, or captions (customized for the niche) across 5 themed categories of 15 items. Each category includes a brief intro note explaining why and when these mental hooks work best."
+};
 
-const labelsMap: Record<string, string> = Object.fromEntries(
-  PRODUCT_DEFS.map((p) => [p.id, p.label])
-);
+const labelsMap: Record<string, string> = {
+  planner: "Planner / Workbook",
+  prompts: "AI Prompt Pack",
+  templates: "Template Pack",
+  guide: "Mini-Guide / Book",
+  checklist: "Checklist System",
+  swipe: "Swipe File"
+};
 
-// Text-generation models in priority order, fastest first. gemini-2.5-flash-lite
-// is the lowest-latency Flash model; if it is unavailable or overloaded we fall
-// back to the fuller gemini-2.5-flash, then gemini-2.0-flash. (The original
-// gemini-3.5-flash returned persistent 503 "high demand" / UNAVAILABLE for this
-// key; the 2.5 family is provisioned — cover images use gemini-2.5-flash-image.)
-const TEXT_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"];
+import fs from "fs";
 
-function isRetriableGeminiError(err: unknown): boolean {
-  const msg = String((err as any)?.message ?? err);
-  return /\b(429|500|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg);
+interface Task {
+  id: string;
+  productId: string;
+  productName: string;
+  niche: string;
+  angle?: string;
+  language: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  result?: any;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
 }
 
-// generateContent with model fallback + light backoff. Tries each model in
-// TEXT_MODELS up to ATTEMPTS_PER_MODEL times, retrying transient/overload errors
-// before moving to the next model. Non-retriable errors (e.g. a malformed
-// request) fail fast.
-const ATTEMPTS_PER_MODEL = 2;
+const DB_FILE = path.join(process.cwd(), "queue_store.json");
 
-async function generateText(params: { contents: any; config?: any }) {
-  let lastErr: unknown;
-  for (const model of TEXT_MODELS) {
-    for (let attempt = 0; attempt < ATTEMPTS_PER_MODEL; attempt++) {
+function loadQueue(): Task[] {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const data = fs.readFileSync(DB_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Failed to read queue_store.json", err);
+  }
+  return [];
+}
+
+function saveQueue(tasks: Task[]) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(tasks, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to write queue_store.json", err);
+  }
+}
+
+// In-memory queue initialized from disk
+let taskQueue: Task[] = loadQueue();
+
+// Core content generation utility shared by synchronous manufacture and the background queue
+async function manufactureProduct(productId: string, niche: string, angle?: string, language?: string) {
+  if (!productId || !specMap[productId]) {
+    throw new Error("Invalid product ID selected.");
+  }
+
+  if (!niche || niche.trim() === "") {
+    throw new Error("Niche/Audience is required.");
+  }
+
+  const spec = specMap[productId];
+  const productName = labelsMap[productId];
+
+  if (!geminiApiKey) {
+    throw new Error("GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets.");
+  }
+
+  const systemInstruction = 
+    "You are a master digital product engineer and elite copywriter. " +
+    "Your goal is to generate exceptionally detailed, highly professional, completely filled digital products " +
+    "and the exact optimized sales copy of the product to sell on platforms like Gumroad and Etsy." +
+    "\n\nCRITICAL SPEC: Generate absolute FULL content, not summary outlines or instructions on what to write. " +
+    "If the specification asks for 30 daily pages or 50 prompts, write out detailed content for them. " +
+    "Keep the tone encouraging, high-value, premium, and actionable.";
+
+  const promptText = `Please manufacture a premium quality digital product of type: "${productName}".
+Specification of the product: ${spec}
+Niche/Audience: ${niche}
+${angle ? `Specific angle / flavor requested: ${angle}` : ""}
+${language && language !== 'English' ? `CRITICAL: You MUST translate and output ALL generated content, including the product content, titles, and sales copy, exactly into the following language: ${language}` : ""}
+
+Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
+
+  const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  let lastError: any = null;
+
+  for (const modelName of modelsToTry) {
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    while (retryCount < maxRetries) {
       try {
-        return await ai.models.generateContent({ model, ...params });
-      } catch (err) {
-        lastErr = err;
-        if (!isRetriableGeminiError(err)) throw err;
-        // Only back off when another attempt remains on this model; otherwise
-        // fall through to the next model immediately.
-        if (attempt < ATTEMPTS_PER_MODEL - 1) {
-          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        console.log(`[Generator] Requesting content generation from ${modelName} (attempt ${retryCount + 1}/${maxRetries})...`);
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: promptText,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                productTitle: {
+                  type: Type.STRING,
+                  description: "A highly click-worthy, premium title for the digital product designed for this niche."
+                },
+                productContent: {
+                  type: Type.STRING,
+                  description: "The complete, detailed, ready-to-sell content. Section headers, copy-paste components, exercises, full text. Absolutely complete."
+                },
+                etsyTitle: {
+                  type: Type.STRING,
+                  description: "Etsy listing title (under 140 chars, front-loaded with search terms like '30 Day Planner for [Niche]', '50 AI Prompts...')."
+                },
+                priceRecommendationValue: {
+                  type: Type.STRING,
+                  description: "Recommended price (e.g., '$19') with 1-sentence reasoning based on pricing power in this niche."
+                },
+                listingDescription: {
+                  type: Type.STRING,
+                  description: "Etsy description containing: an interactive hook line, a scannable bullet points list of 'What is inside', 'Who is this for', and a note on 'How to download'."
+                },
+                etsyTags: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Exactly 13 comma-separated search tags (each under 20 characters length)."
+                },
+                gumroadBlurb: {
+                  type: Type.STRING,
+                  description: "A highly persuasive, punchy 2-sentence marketing block for the Gumroad page."
+                }
+              },
+              required: [
+                "productTitle",
+                "productContent",
+                "etsyTitle",
+                "priceRecommendationValue",
+                "listingDescription",
+                "etsyTags",
+                "gumroadBlurb"
+              ]
+            }
+          }
+        });
+
+        const responseText = response.text;
+        if (!responseText) {
+          throw new Error("Empty response received from Gemini model.");
         }
+
+        return JSON.parse(responseText);
+
+      } catch (error: any) {
+        lastError = error;
+        const errorMessage = error.message || "";
+        const isTransient = errorMessage.includes("503") || 
+                            error.status === 503 || 
+                            errorMessage.includes("429") ||
+                            errorMessage.includes("UNAVAILABLE") ||
+                            errorMessage.includes("high demand") ||
+                            errorMessage.includes("overloaded");
+        
+        if (isTransient) {
+          retryCount++;
+          if (retryCount < maxRetries) {
+            const delay = (Math.pow(2, retryCount) * 1000) + (Math.random() * 1000);
+            console.warn(`[Generator] Transient error on ${modelName} (attempt ${retryCount}/${maxRetries}), retrying in ${Math.round(delay)}ms...`, errorMessage);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+        
+        console.warn(`[Generator] Model ${modelName} failed. Error:`, errorMessage);
+        break; // break retry loop to try the next model
       }
     }
   }
-  throw lastErr;
+  throw lastError;
 }
 
-  app.post("/api/manufacture", async (req, res) => {
-    try {
-      const { productId, niche, angle, language } = req.body;
-  
-      if (!productId || !specMap[productId]) {
-        return res.status(400).json({ error: "Invalid product ID selected." });
-      }
-  
-      if (!niche || niche.trim() === "") {
-        return res.status(400).json({ error: "Niche/Audience is required." });
-      }
-  
-      const spec = specMap[productId];
-      const productName = labelsMap[productId];
-  
-      if (!geminiApiKey) {
-        return res.status(500).json({ 
-          error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." 
-        });
-      }
-  
-      const systemInstruction = 
-        "You are a master digital product engineer and elite copywriter. " +
-        "Your goal is to generate exceptionally detailed, highly professional, completely filled digital products " +
-        "and the exact optimized sales copy of the product to sell on platforms like Gumroad and Etsy." +
-        "\n\nCRITICAL SPEC: Generate absolute FULL content, not summary outlines or instructions on what to write. " +
-        "If the specification asks for 30 daily pages or 50 prompts, write out detailed content for them. " +
-        "Keep the tone encouraging, high-value, premium, and actionable.";
-  
-      const promptText = `Please manufacture a premium quality digital product of type: "${productName}".
-  Specification of the product: ${spec}
-  Niche/Audience: ${niche}
-  ${angle ? `Specific angle / flavor requested: ${angle}` : ""}
-  ${language && language !== 'English' ? `CRITICAL: You MUST translate and output ALL generated content, including the product content, titles, and sales copy, exactly into the following language: ${language}` : ""}
-  
-  Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
+let isProcessing = false;
 
-    const response = await generateText({
-      contents: promptText,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            productTitle: {
-              type: Type.STRING,
-              description: "A highly click-worthy, premium title for the digital product designed for this niche."
-            },
-            productContent: {
-              type: Type.STRING,
-              description: "The complete, detailed, ready-to-sell content. Section headers, copy-paste components, exercises, full text. Absolutely complete."
-            },
-            etsyTitle: {
-              type: Type.STRING,
-              description: "Etsy listing title (under 140 chars, front-loaded with search terms like '30 Day Planner for [Niche]', '50 AI Prompts...')."
-            },
-            priceRecommendationValue: {
-              type: Type.STRING,
-              description: "Recommended price (e.g., '$19') with 1-sentence reasoning based on pricing power in this niche."
-            },
-            listingDescription: {
-              type: Type.STRING,
-              description: "Etsy description containing: an interactive hook line, a scannable bullet points list of 'What is inside', 'Who is this for', and a note on 'How to download'."
-            },
-            etsyTags: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Exactly 13 comma-separated search tags (each under 20 characters length)."
-            },
-            gumroadBlurb: {
-              type: Type.STRING,
-              description: "A highly persuasive, punchy 2-sentence marketing block for the Gumroad page."
-            },
-            growthTactics: {
-              type: Type.STRING,
-              description: "A dynamically generated 3-month launch roadmap, including milestones for email list growth, social media posting cadence, and initial beta tester acquisition strategies based on the niche."
-            }
-          },
-          required: [
-            "productTitle",
-            "productContent",
-            "etsyTitle",
-            "priceRecommendationValue",
-            "listingDescription",
-            "etsyTags",
-            "gumroadBlurb",
-            "growthTactics"
-          ]
-        }
-      }
-    });
+// Sequential background task runner
+async function processQueueRunner() {
+  if (isProcessing) return;
+  isProcessing = true;
 
-    const responseText = response.text;
-    if (!responseText) {
-      throw new Error("Empty response received from Gemini model.");
+  try {
+    while (true) {
+      const nextTaskIndex = taskQueue.findIndex(t => t.status === "pending");
+      if (nextTaskIndex === -1) {
+        break; // No more pending tasks
+      }
+
+      const task = taskQueue[nextTaskIndex];
+      task.status = "processing";
+      task.startedAt = new Date().toISOString();
+      saveQueue(taskQueue);
+
+      console.log(`[Queue] Starting task ${task.id} (Product: ${task.productId}, Niche: ${task.niche})`);
+
+      try {
+        const result = await manufactureProduct(task.productId, task.niche, task.angle, task.language);
+        task.status = "completed";
+        task.result = result;
+        task.completedAt = new Date().toISOString();
+        console.log(`[Queue] Task ${task.id} completed successfully!`);
+      } catch (err: any) {
+        console.error(`[Queue] Task ${task.id} failed:`, err);
+        task.status = "failed";
+        task.error = err.message || "An unexpected error occurred during background synthesis.";
+        task.completedAt = new Date().toISOString();
+      }
+
+      saveQueue(taskQueue);
     }
+  } catch (err) {
+    console.error("[Queue] Critical queue runner failure:", err);
+  } finally {
+    isProcessing = false;
+  }
+}
 
-    const data = JSON.parse(responseText);
+// 1. Instant/Synchronous Manufacture Endpoint
+app.post("/api/manufacture", async (req, res) => {
+  try {
+    const { productId, niche, angle, language } = req.body;
+    const data = await manufactureProduct(productId, niche, angle, language);
     return res.json(data);
-
   } catch (error: any) {
     console.error("Manufacturing Jammed Error:", error);
     return res.status(500).json({ 
@@ -182,216 +271,76 @@ async function generateText(params: { contents: any; config?: any }) {
   }
 });
 
-app.post("/api/shopify/push", async (req, res) => {
+// 2. Queue management endpoints
+app.get("/api/queue", (req, res) => {
+  res.json({ tasks: taskQueue });
+});
+
+app.post("/api/queue", (req, res) => {
   try {
-    const { title, description, price } = req.body;
-    const token = process.env.SHOPIFY_ACCESS_TOKEN;
-    const domain = process.env.SHOPIFY_STORE_DOMAIN;
+    const { productId, niches, angle, language } = req.body;
 
-    if (!token || !domain) {
-      return res.status(400).json({ error: "Missing SHOPIFY_ACCESS_TOKEN or SHOPIFY_STORE_DOMAIN in environment." });
+    if (!productId || !specMap[productId]) {
+      return res.status(400).json({ error: "Invalid product ID selected." });
     }
 
-    const priceValue = price ? parseFloat(price.replace(/[^0-9.]/g, '')) || 19.99 : 19.99;
-
-    const query = `
-      mutation productCreate($input: ProductInput!) {
-        productCreate(input: $input) {
-          product {
-            id
-            title
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    // Shopify GraphQL API
-    const response = await fetch(`https://${domain}/admin/api/2024-01/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": token
-      },
-      body: JSON.stringify({
-        query,
-        variables: {
-          input: {
-            title: title,
-            descriptionHtml: description,
-            variants: [{
-              price: priceValue.toString()
-            }]
-          }
-        }
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(JSON.stringify(data));
-    }
-    
-    if (data.data?.productCreate?.userErrors?.length > 0) {
-      throw new Error(data.data.productCreate.userErrors[0].message);
+    if (!niches || !Array.isArray(niches) || niches.length === 0) {
+      return res.status(400).json({ error: "At least one target audience/niche is required." });
     }
 
-    const productId = data.data?.productCreate?.product?.id?.split('/').pop();
-    
-    res.json({ success: true, url: `https://${domain}/admin/products/${productId}` });
-  } catch (error: any) {
-    console.error("Shopify API Error:", error);
-    res.status(500).json({ error: error.message || "Failed to push to Shopify." });
+    const productName = labelsMap[productId];
+    const newTasks: Task[] = [];
+
+    for (const rawNiche of niches) {
+      const cleanNiche = rawNiche.trim();
+      if (!cleanNiche) continue;
+
+      const task: Task = {
+        id: "task_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now(),
+        productId,
+        productName,
+        niche: cleanNiche,
+        angle: angle?.trim() || undefined,
+        language: language || "English",
+        status: "pending",
+        createdAt: new Date().toISOString()
+      };
+      newTasks.push(task);
+      taskQueue.push(task);
+    }
+
+    saveQueue(taskQueue);
+
+    // Run queue in the background (fire-and-forget, non-blocking)
+    processQueueRunner().catch(err => console.error("[Queue] Failed to execute background runner:", err));
+
+    return res.json({ success: true, added: newTasks.length, tasks: newTasks });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to add items to queue." });
   }
 });
 
-app.post("/api/notion/push", async (req, res) => {
-  try {
-    const { title, content, targetAudience } = req.body;
-    const notionKey = process.env.NOTION_API_KEY;
-    const parentPageId = process.env.NOTION_PARENT_PAGE_ID;
-
-    if (!notionKey || !parentPageId) {
-      return res.status(400).json({ error: "Missing NOTION_API_KEY or NOTION_PARENT_PAGE_ID in environment." });
-    }
-
-    const notion = new NotionClient({ auth: notionKey });
-    
-    // Convert content text into rough Notion blocks
-    const children: any[] = [];
-    const lines = content.split('\n');
-    let currentParagraph = "";
-
-    const flushParagraph = () => {
-      if (currentParagraph.trim()) {
-        children.push({
-          object: 'block',
-          type: 'paragraph',
-          paragraph: { rich_text: [{ type: 'text', text: { content: currentParagraph.substring(0, 2000) } }] }
-        });
-        currentParagraph = "";
-      }
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('# ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_1', heading_1: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^# /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('## ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^## /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('### ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^### /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^[-*] /, '').substring(0, 2000) } }] } });
-      } else if (trimmed === '') {
-        flushParagraph();
-      } else {
-        currentParagraph += (currentParagraph ? "\n" : "") + trimmed;
-      }
-    }
-    flushParagraph();
-
-    // Notion limits creation to 100 blocks at once in children array
-    const response = await notion.pages.create({
-      parent: { page_id: parentPageId },
-      properties: {
-        title: {
-          title: [
-            { text: { content: title.substring(0, 2000) } }
-          ]
-        }
-      },
-      children: children.slice(0, 100)
-    });
-
-    res.json({ success: true, url: (response as any).url });
-  } catch (error: any) {
-    console.error("Notion API Error:", error);
-    res.status(500).json({ error: error.message || "Failed to push to Notion." });
-  }
+app.post("/api/queue/clear", (req, res) => {
+  // Clear completed and failed tasks, keep processing/pending intact
+  taskQueue = taskQueue.filter(t => t.status === "pending" || t.status === "processing");
+  saveQueue(taskQueue);
+  return res.json({ success: true, tasks: taskQueue });
 });
 
-app.get("/api/trends", async (req, res) => {
-  try {
-    const response = await generateText({
-      contents: "Return a JSON array of 5 currently trending digital product niches or target audiences, just 5 strings answering the query. Be specific, like 'ADHD Notion Creators', not just 'ADHD'.",
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.STRING
-          }
-        }
-      }
-    });
-    const trends = JSON.parse(response.text || "[]");
-    res.json({ trends });
-  } catch (error: any) {
-    console.error("Trends Error:", error);
-    res.status(500).json({ error: error.message || "Failed to fetch trends." });
-  }
+app.delete("/api/queue/tasks/:id", (req, res) => {
+  const { id } = req.params;
+  taskQueue = taskQueue.filter(t => t.id !== id);
+  saveQueue(taskQueue);
+  return res.json({ success: true });
 });
 
-app.post("/api/image/generate", async (req, res) => {
-  try {
-    const { productTitle, niche } = req.body;
-    
-    if (!productTitle) {
-      return res.status(400).json({ error: "Product title required for cover art generation." });
-    }
+// Auto-run processing on server startup if any pending items exist
+processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
 
-    const prompt = `A clean, elegant, premium, modern graphical cover for a digital product targeting ${niche || 'creators'}. The product is named: "${productTitle}". Best suited for a digital download product card, minimal style.`;
-    
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{ text: prompt }]
-      },
-      config: {
-        imageConfig: { aspectRatio: "4:3" }
-      }
-    });
 
-    let imageUrl = null;
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        const base64EncodeString = part.inlineData.data;
-        const mimeType = part.inlineData.mimeType || "image/jpeg";
-        imageUrl = `data:${mimeType};base64,${base64EncodeString}`;
-        break;
-      }
-    }
-
-    if (!imageUrl) {
-      throw new Error("No image generated");
-    }
-    
-    res.json({ imageUrl });
-  } catch (error: any) {
-    console.error("Image Generation Error:", error);
-    res.status(500).json({ error: error.message || "Failed to generate image." });
-  }
-});
-
-// Standalone server bootstrap: Vite dev middleware (dev) or static dist/ serving
-// (production `node dist/server.cjs`) + listen(). On Vercel the app runs as a
-// serverless function (see api/[...path].ts) which imports the exported `app`
-// directly, so this bootstrap is skipped — Vercel serves the static frontend
-// and routes /api/* to the function (see vercel.json).
+// Setup Vite Dev Middleware / Static files serving
 async function mountViteMiddleware() {
   if (process.env.NODE_ENV !== "production") {
-    // Dynamic import via a variable specifier so Vite (a devDependency) is never
-    // pulled into the production esbuild bundle or the Vercel function trace.
-    const viteSpecifier = "vite";
-    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -406,14 +355,8 @@ async function mountViteMiddleware() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Nichesmith Digital Factory active on http://0.0.0.0:${PORT}`);
+    console.log(`DropKit Digital Factory active on http://0.0.0.0:${PORT}`);
   });
 }
 
-// Vercel sets process.env.VERCEL; in that case the app is consumed as a
-// serverless handler and must not call listen().
-if (!process.env.VERCEL) {
-  mountViteMiddleware();
-}
-
-export default app;
+mountViteMiddleware();
