@@ -35,6 +35,37 @@ const labelsMap: Record<string, string> = Object.fromEntries(
   PRODUCT_DEFS.map((p) => [p.id, p.label])
 );
 
+// Text-generation models in priority order. The original `gemini-3.5-flash`
+// returns persistent 503 "high demand" / UNAVAILABLE for this key, so we lead
+// with the GA flash models (the 2.5 family is provisioned — cover images use
+// gemini-2.5-flash-image) and fall through to the next model on transient,
+// overload, or quota errors.
+const TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash"];
+
+function isRetriableGeminiError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err);
+  return /\b(429|500|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg);
+}
+
+// generateContent with model fallback + light backoff. Tries each model in
+// TEXT_MODELS, retrying transient/overload errors twice before moving to the
+// next model. Non-retriable errors (e.g. a malformed request) fail fast.
+async function generateText(params: { contents: any; config?: any }) {
+  let lastErr: unknown;
+  for (const model of TEXT_MODELS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await ai.models.generateContent({ model, ...params });
+      } catch (err) {
+        lastErr = err;
+        if (!isRetriableGeminiError(err)) throw err;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
   app.post("/api/manufacture", async (req, res) => {
     try {
       const { productId, niche, angle, language } = req.body;
@@ -72,8 +103,7 @@ const labelsMap: Record<string, string> = Object.fromEntries(
   
   Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateText({
       contents: promptText,
       config: {
         systemInstruction,
@@ -283,8 +313,7 @@ app.post("/api/notion/push", async (req, res) => {
 
 app.get("/api/trends", async (req, res) => {
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    const response = await generateText({
       contents: "Return a JSON array of 5 currently trending digital product niches or target audiences, just 5 strings answering the query. Be specific, like 'ADHD Notion Creators', not just 'ADHD'.",
       config: {
         responseMimeType: "application/json",
