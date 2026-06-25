@@ -45,6 +45,21 @@ const labelsMap: Record<string, string> = {
 import fs from "fs";
 import { execSync } from "child_process";
 
+// Model health tracking to dynamically deprioritize overloaded/503/429 models temporarily
+const modelCooldowns: Record<string, number> = {};
+
+function getOrderedModels(preferredModels: string[]): string[] {
+  const now = Date.now();
+  const healthy = preferredModels.filter(m => !modelCooldowns[m] || modelCooldowns[m] < now);
+  const coolingDown = preferredModels.filter(m => modelCooldowns[m] && modelCooldowns[m] >= now);
+  return [...healthy, ...coolingDown];
+}
+
+function markModelFailure(modelName: string, minutes = 5) {
+  modelCooldowns[modelName] = Date.now() + minutes * 60 * 1000;
+  console.warn(`[ModelTracker] Demoting ${modelName} for ${minutes} minutes due to a transient/overload error.`);
+}
+
 const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
 
 function loadArchive(): any[] {
@@ -137,26 +152,53 @@ async function runAutonomousWorkflow() {
     configureGit();
     
     // Step 1: Brainstorm niche via Gemini
-    console.log("[Autonomous] Brainstorming fresh niche via Gemini...");
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: "Generate a highly specific, modern, trending digital product niche or target audience that has strong monetization potential right now. Return a JSON object with a single field 'niche' containing a short 3-5 word name for this target audience (e.g. 'Vegan Meal Prep Beginners', 'First-time Chicken Owners', 'ADHD College Students', 'No-code App Builders', 'Local Bakery Owners'). Do not return any other text, formatting, or placeholders.",
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              niche: { type: Type.STRING }
-            },
-            required: ["niche"]
+    console.log("[Autonomous] Brainstorming fresh niche via Gemini with robust fallback...");
+    const baseBrainstormModels = [
+      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-2.5-pro"
+    ];
+    const brainstormModels = getOrderedModels(baseBrainstormModels);
+
+    for (const bModel of brainstormModels) {
+      try {
+        console.log(`[Autonomous] Attempting niche brainstorm with ${bModel}...`);
+        const response = await ai.models.generateContent({
+          model: bModel,
+          contents: "Generate a highly specific, modern, trending digital product niche or target audience that has strong monetization potential right now. Return a JSON object with a single field 'niche' containing a short 3-5 word name for this target audience (e.g. 'Vegan Meal Prep Beginners', 'First-time Chicken Owners', 'ADHD College Students', 'No-code App Builders', 'Local Bakery Owners'). Do not return any other text, formatting, or placeholders.",
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                niche: { type: Type.STRING }
+              },
+              required: ["niche"]
+            }
           }
+        });
+        const data = JSON.parse(response.text || "{}");
+        if (data.niche) {
+          chosenNiche = data.niche;
+          console.log(`[Autonomous] Successfully brainstormed niche "${chosenNiche}" using ${bModel}`);
+          break;
         }
-      });
-      const data = JSON.parse(response.text || "{}");
-      chosenNiche = data.niche || "";
-    } catch (err: any) {
-      console.warn("[Autonomous] Gemini brainstorming failed, picking from backup preset:", err.message);
+      } catch (err: any) {
+        console.warn(`[Autonomous] Brainstorming with ${bModel} failed:`, err.message || err);
+        const errorMessage = err.message || "";
+        const isTransient = errorMessage.includes("503") || 
+                            err.status === 503 || 
+                            errorMessage.includes("429") ||
+                            errorMessage.includes("UNAVAILABLE") ||
+                            errorMessage.includes("high demand") ||
+                            errorMessage.includes("overloaded");
+        if (isTransient) {
+          markModelFailure(bModel, 5);
+        }
+      }
     }
     
     if (!chosenNiche) {
@@ -352,7 +394,15 @@ ${language && language !== 'English' ? `CRITICAL: You MUST translate and output 
 
 Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
 
-  const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  const baseModelsToTry = [
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.5-pro"
+  ];
+  const modelsToTry = getOrderedModels(baseModelsToTry);
   let lastError: any = null;
 
   for (const modelName of modelsToTry) {
@@ -432,10 +482,15 @@ Please output the generated product content and its sales listings in the reques
                             errorMessage.includes("overloaded");
         
         if (isTransient) {
+          // Immediately demote the overloaded model to prevent trying it for the rest of this batch
+          markModelFailure(modelName, 5);
+          console.warn(`[Generator] Transient error on ${modelName}. Switching immediately to the next fallback model...`, errorMessage);
+          break; // break retry loop immediately to try the next healthy model
+        } else {
           retryCount++;
           if (retryCount < maxRetries) {
             const delay = (Math.pow(2, retryCount) * 1000) + (Math.random() * 1000);
-            console.warn(`[Generator] Transient error on ${modelName} (attempt ${retryCount}/${maxRetries}), retrying in ${Math.round(delay)}ms...`, errorMessage);
+            console.warn(`[Generator] Non-transient error on ${modelName} (attempt ${retryCount}/${maxRetries}), retrying in ${Math.round(delay)}ms...`, errorMessage);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
