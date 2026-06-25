@@ -23,11 +23,11 @@ in that hosted environment.
 - **Backend:** Express 4 in a single `server.ts`, run with `tsx` in dev.
 - **AI:** `@google/genai` (Gemini). Text uses `gemini-3.5-flash`; cover images use
   `gemini-2.5-flash-image`.
-- **Key libraries:** `motion` (animations), `jspdf` (PDF export),
-  `react-markdown`, `recharts` (trend sparklines), `qrcode.react`,
-  `lucide-react` (icons), `@notionhq/client` (Notion push),
-  `@vercel/analytics` (web analytics — `inject()` is called once in
-  `src/main.tsx`).
+- **Key libraries:** `motion` (animations), `jspdf` (PDF export), `jszip`
+  (bundles the archive into a downloadable ZIP), `react-markdown`,
+  `recharts` (trend sparklines), `qrcode.react`, `lucide-react` (icons),
+  `@notionhq/client` (Notion push), `@vercel/analytics` (web analytics —
+  `inject()` is called once in `src/main.tsx`).
 
 ## Commands
 

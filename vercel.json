@@ -3,12 +3,13 @@
   "buildCommand": "vite build && esbuild server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=server.generated.cjs",
   "outputDirectory": "dist",
   "functions": {
-    "api/[...path].ts": {
+    "api/index.ts": {
       "maxDuration": 60,
       "includeFiles": "server.generated.cjs"
     }
   },
   "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

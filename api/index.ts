@@ -1,6 +1,10 @@
 // Vercel serverless entry for DropKit's backend.
 //
-// All `/api/*` requests are routed here (see vercel.json). The Express app is
+// All `/api/*` requests are rewritten to this single function in vercel.json
+// (an explicit `/api/(.*)` rewrite, rather than a `[...path]` catch-all whose
+// filename inference only routed single-segment paths and 404'd nested ones
+// like /api/image/generate). Express still sees the original request URL. The
+// Express app is
 // pre-bundled by the Vercel buildCommand into a self-contained CommonJS file
 // (server.generated.cjs) and shipped with this function via `includeFiles`. We
 // load it with createRequire rather than a static `import "../server"`: the
