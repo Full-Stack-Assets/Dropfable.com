@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { jsPDF } from "jspdf";
+import JSZip from "jszip";
 import ReactMarkdown from "react-markdown";
 import { LineChart, Line, ResponsiveContainer, YAxis } from "recharts";
 import { QRCodeSVG } from "qrcode.react";
@@ -32,7 +33,8 @@ import {
   Edit2,
   Archive,
   Grid,
-  List
+  List,
+  FolderArchive
 } from "lucide-react";
 
 interface ProductType {
@@ -277,6 +279,81 @@ export default function App() {
     document.body.appendChild(linkElement);
     linkElement.click();
     document.body.removeChild(linkElement);
+  };
+
+  // Build a single, self-contained Markdown document (full product content +
+  // Etsy/Gumroad sales copy) for one archived item — mirrors the per-product
+  // download but bundled for the "Download All Files" ZIP.
+  const buildProductMarkdown = (item: ManufactureResult): string => {
+    const tags = Array.isArray(item.etsyTags) ? item.etsyTags.join(", ") : (item.etsyTags || "");
+    return [
+      item.productContent || "",
+      "\n\n---\n\n## 📦 Sales Copy & Listing Metadata\n",
+      `**Target Audience / Niche:** ${item.originalNiche || "—"}`,
+      `\n**Recommended Price:** ${item.priceRecommendationValue || "—"}`,
+      `\n### Etsy Title\n${item.etsyTitle || "—"}`,
+      `\n### Etsy Tags (${Array.isArray(item.etsyTags) ? item.etsyTags.length : 0})\n${tags}`,
+      `\n### Listing Description\n${item.listingDescription || "—"}`,
+      `\n### Gumroad Blurb\n${item.gumroadBlurb || "—"}`,
+      `\n### 3-Month Growth Roadmap\n${item.growthTactics || "—"}`,
+      "\n\n---\n_Manufactured by Full Stack Assets · DropKit_\n",
+    ].join("\n");
+  };
+
+  const [isZipping, setIsZipping] = useState(false);
+
+  // Bundle every archived product into one ZIP: a Markdown file per item (plus
+  // its cover image when present) and an index. One click, one download.
+  const handleDownloadAllFiles = async () => {
+    if (archivedItems.length === 0) {
+      alert("Archive is empty.");
+      return;
+    }
+    setIsZipping(true);
+    try {
+      const zip = new JSZip();
+      const slug = (s: string) =>
+        (s || "untitled").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 60);
+      const pad = (n: number) => String(n).padStart(2, "0");
+
+      let index = `# DropKit Archive — ${archivedItems.length} Products\n\n`;
+      const usedNames = new Set<string>();
+
+      archivedItems.forEach((item, i) => {
+        let base = `${pad(i + 1)}-${slug(item.productTitle) || "product"}`;
+        while (usedNames.has(base)) base += "-x";
+        usedNames.add(base);
+
+        zip.file(`${base}.md`, buildProductMarkdown(item));
+        index += `${i + 1}. [${item.originalNiche || "—"}] ${item.productTitle || "Untitled"} — ${base}.md\n`;
+
+        // Embed cover art as a sibling image when one was generated.
+        const cover = item.coverImage;
+        if (cover && cover.startsWith("data:")) {
+          const comma = cover.indexOf(",");
+          const meta = cover.slice(5, comma); // e.g. image/png;base64
+          const b64 = cover.slice(comma + 1);
+          const ext = meta.includes("png") ? "png" : meta.includes("webp") ? "webp" : "jpg";
+          zip.file(`${base}.${ext}`, b64, { base64: true });
+        }
+      });
+
+      zip.file("00-INDEX.md", index);
+
+      const blob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "dropkit_archive_documents.zip";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert("Could not build ZIP: " + (e?.message || e));
+    } finally {
+      setIsZipping(false);
+    }
   };
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -1413,13 +1490,20 @@ ${item.productContent}
                     
                     <h3 className="text-white/90 mt-10 mb-6 flex items-center gap-2 text-[10px] uppercase tracking-widest font-medium border-b border-bord pb-3"><Info className="w-4 h-4"/> Data Management</h3>
                     <div className="flex flex-wrap gap-4">
-                      <button 
+                      <button
+                        onClick={handleDownloadAllFiles}
+                        disabled={isZipping || archivedItems.length === 0}
+                        className="text-[9px] uppercase tracking-widest text-ink hover:text-white transition-colors border border-bord px-6 py-3 hover:bg-white/5 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <FolderArchive className="w-3.5 h-3.5" /> {isZipping ? "Bundling..." : `Download All Files (ZIP · ${archivedItems.length})`}
+                      </button>
+                      <button
                         onClick={handleBackupArchive}
                         className="text-[9px] uppercase tracking-widest text-ink hover:text-white transition-colors border border-bord px-6 py-3 hover:bg-white/5 flex items-center gap-2"
                       >
                         <Download className="w-3.5 h-3.5" /> Backup All Data (JSON)
                       </button>
-                      <button 
+                      <button
                         onClick={() => fileInputRef.current?.click()}
                         className="text-[9px] uppercase tracking-widest text-white/50 hover:text-white transition-colors border border-bord px-6 py-3 hover:bg-white/5 flex items-center gap-2"
                       >
