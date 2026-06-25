@@ -156,6 +156,35 @@ export default function App() {
   const [queueTasks, setQueueTasks] = useState<any[]>([]);
   const [isQueueSubmitting, setIsQueueSubmitting] = useState(false);
 
+  const [autonomousStatus, setAutonomousStatus] = useState<any>(null);
+  const [isTriggeringAutonomous, setIsTriggeringAutonomous] = useState(false);
+
+  const fetchAutonomousStatus = async () => {
+    try {
+      const res = await fetch("/api/autonomous-status");
+      if (res.ok) {
+        const data = await res.json();
+        setAutonomousStatus(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch autonomous status:", err);
+    }
+  };
+
+  const handleTriggerAutonomous = async () => {
+    setIsTriggeringAutonomous(true);
+    try {
+      const res = await fetch("/api/autonomous-trigger", { method: "POST" });
+      if (res.ok) {
+        await fetchAutonomousStatus();
+      }
+    } catch (err) {
+      console.error("Failed to trigger autonomous generator:", err);
+    } finally {
+      setIsTriggeringAutonomous(false);
+    }
+  };
+
   const fetchQueue = async () => {
     try {
       const res = await fetch("/api/queue");
@@ -229,17 +258,59 @@ export default function App() {
     }
   };
 
+  const syncArchive = async () => {
+    try {
+      const res = await fetch("/api/archive");
+      if (res.ok) {
+        const { archive: serverArchive } = await res.json();
+        const localSaved = localStorage.getItem('dropkit_archive');
+        let localArchive: ManufactureResult[] = [];
+        if (localSaved) {
+          try { localArchive = JSON.parse(localSaved); } catch (e) {}
+        }
+        
+        const response = await fetch("/api/archive/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: localArchive })
+        });
+        
+        if (response.ok) {
+          const { archive: mergedArchive } = await response.json();
+          setArchivedItems(mergedArchive);
+          localStorage.setItem('dropkit_archive', JSON.stringify(mergedArchive));
+        } else {
+          setArchivedItems(serverArchive);
+          localStorage.setItem('dropkit_archive', JSON.stringify(serverArchive));
+        }
+      }
+    } catch (err) {
+      console.error("Failed to sync archive:", err);
+      const localSaved = localStorage.getItem('dropkit_archive');
+      if (localSaved) {
+        try { setArchivedItems(JSON.parse(localSaved)); } catch (e) {}
+      }
+    }
+  };
+
   useEffect(() => {
     fetchQueue();
+    fetchAutonomousStatus();
+    syncArchive();
   }, []);
 
   useEffect(() => {
-    const hasActive = queueTasks.some(t => t.status === "pending" || t.status === "processing");
-    if (hasActive) {
-      const interval = setInterval(fetchQueue, 3000);
+    const hasActiveQueue = queueTasks.some(t => t.status === "pending" || t.status === "processing");
+    const hasActiveAutonomous = autonomousStatus?.isRunning;
+    
+    if (hasActiveQueue || hasActiveAutonomous) {
+      const interval = setInterval(() => {
+        if (hasActiveQueue) fetchQueue();
+        if (hasActiveAutonomous) fetchAutonomousStatus();
+      }, 3000);
       return () => clearInterval(interval);
     }
-  }, [queueTasks]);
+  }, [queueTasks, autonomousStatus]);
 
   const updateCalculator = (id: string, field: 'traffic' | 'conversion', value: string) => {
     setCalculatorState(prev => ({
@@ -260,27 +331,43 @@ export default function App() {
     return "Beginner";
   };
 
-  useEffect(() => {
-    const saved = localStorage.getItem('dropkit_archive');
-    if (saved) {
-      try { setArchivedItems(JSON.parse(saved)); } catch (e) {}
-    }
-  }, []);
-
-  const handleSaveToArchive = (item: ManufactureResult) => {
+  const handleSaveToArchive = async (item: ManufactureResult) => {
     const isAlreadySaved = archivedItems.some((cached) => cached.productTitle === item.productTitle);
     if (!isAlreadySaved) {
       const updated = [...archivedItems, item];
       setArchivedItems(updated);
       localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+      
+      try {
+        await fetch("/api/archive", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item })
+        });
+      } catch (err) {
+        console.error("Failed to save to server archive:", err);
+      }
     }
   };
 
-  const handleRemoveFromArchive = (index: number) => {
+  const handleRemoveFromArchive = async (index: number) => {
+    const item = archivedItems[index];
     const updated = archivedItems.filter((_, i) => i !== index);
     setArchivedItems(updated);
     localStorage.setItem('dropkit_archive', JSON.stringify(updated));
     setSelectedArchiveIndices(prev => prev.filter(i => i !== index).map(i => i > index ? i - 1 : i));
+    
+    if (item && item.productTitle) {
+      try {
+        await fetch("/api/archive/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: item.productTitle })
+        });
+      } catch (err) {
+        console.error("Failed to remove from server archive:", err);
+      }
+    }
   };
 
   const toggleArchiveSelection = (idx: number) => {
@@ -1008,6 +1095,112 @@ ${item.productContent}
                   className="text-[9px] uppercase tracking-widest text-red-400/80 hover:text-red-400 transition-colors flex items-center justify-center gap-2 border border-red-900/30 px-4 py-2 hover:bg-red-900/10 cursor-pointer h-9 w-full sm:w-auto whitespace-nowrap"
                 >
                   <Trash2 className="w-3 h-3" /> Clear Finished
+                </button>
+              </div>
+            </div>
+
+            {/* Autonomous Scheduled Batch Dashboard */}
+            <div className="border border-white/10 bg-[#0E0E0E] p-6 mb-10 relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4">
+                <span className="text-[9px] px-2.5 py-1 border border-emerald-500/30 bg-emerald-500/5 text-emerald-400 uppercase tracking-widest font-mono rounded-sm flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${autonomousStatus?.isRunning ? 'animate-ping' : 'animate-pulse'}`} />
+                  Hourly Autonomous AI Active
+                </span>
+              </div>
+              
+              <div className="mb-6 max-w-2xl">
+                <h3 className="text-lg font-light text-white tracking-wide flex items-center gap-2 mb-1.5 font-serif italic">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  Scheduled AI Factory Engine
+                </h3>
+                <p className="text-xs font-light text-white/50 leading-relaxed">
+                  Every 60 minutes, the server autonomously brainstorms a trending niche, constructs a batch of all 6 core products, saves them to the archive, writes them to the local workspace, and pushes to your configured GitHub repository.
+                </p>
+              </div>
+
+              {/* Status and Parameters Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-white/5 mb-6">
+                <div>
+                  <span className="text-[9px] uppercase tracking-widest text-white/40 block mb-1 font-mono">Current Status</span>
+                  {autonomousStatus?.isRunning ? (
+                    <div className="space-y-1">
+                      <span className="text-xs font-medium text-amber-400 animate-pulse flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Generating Batch... ({autonomousStatus?.currentProductIndex}/{autonomousStatus?.totalProducts})
+                      </span>
+                      <p className="text-[10px] font-mono text-white/40">
+                        Current Product: <span className="text-white/60">
+                          {autonomousStatus?.currentProductIndex === 1 ? "Planner / Workbook" : 
+                           autonomousStatus?.currentProductIndex === 2 ? "AI Prompt Pack" : 
+                           autonomousStatus?.currentProductIndex === 3 ? "Template Pack" : 
+                           autonomousStatus?.currentProductIndex === 4 ? "Mini-Guide / Book" : 
+                           autonomousStatus?.currentProductIndex === 5 ? "Checklist System" : 
+                           "Swipe File"}
+                        </span>
+                      </p>
+                    </div>
+                  ) : (
+                    <span className="text-xs font-medium text-emerald-400 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Standing By (Sleep State)
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <span className="text-[9px] uppercase tracking-widest text-white/40 block mb-1 font-mono">Target Niche</span>
+                  <span className="text-xs text-white/80 font-serif italic font-medium">
+                    {autonomousStatus?.currentNiche || "Waiting for next cycle..."}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[9px] uppercase tracking-widest text-white/40 block mb-1 font-mono">Time Sync (Local)</span>
+                  <div className="text-[11px] text-white/60 space-y-0.5 font-mono">
+                    <div>Last Run: {autonomousStatus?.lastRunTime ? new Date(autonomousStatus.lastRunTime).toLocaleTimeString() : "Never"}</div>
+                    <div>Next Run: {autonomousStatus?.nextRunTime ? new Date(autonomousStatus.nextRunTime).toLocaleTimeString() : "Within 1 hr"}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* History / Recent Runs */}
+              {autonomousStatus?.history && autonomousStatus.history.length > 0 && (
+                <div className="pt-4 border-t border-white/5">
+                  <span className="text-[9px] uppercase tracking-widest text-white/40 block mb-2 font-mono">Recent Autonomous Batches (Local & GitHub Commits)</span>
+                  <div className="max-h-[100px] overflow-y-auto space-y-1.5 pr-2">
+                    {autonomousStatus.history.map((run: any, idx: number) => (
+                      <div key={idx} className="flex items-center justify-between text-[10px] font-mono border-b border-white/[0.02] pb-1">
+                        <span className="text-white/70 truncate max-w-[250px]">{run.niche}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-white/40">{new Date(run.timestamp).toLocaleTimeString()}</span>
+                          <span className={`px-1.5 py-0.5 rounded-sm text-[8px] uppercase font-bold ${run.status === 'success' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+                            {run.status}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Control Panel / Override button */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-white/5 bg-white/[0.01] -mx-6 -mb-6 p-6">
+                <div className="text-[10px] text-white/30 font-light max-w-md">
+                  Want to see the autonomous AI build a batch instantly? Click "Force Run Cycle" to trigger the hourly pipeline manually now.
+                </div>
+                <button
+                  onClick={handleTriggerAutonomous}
+                  disabled={autonomousStatus?.isRunning || isTriggeringAutonomous}
+                  className="w-full sm:w-auto text-[9px] uppercase tracking-widest text-black bg-white hover:bg-white/90 disabled:bg-white/10 disabled:text-white/30 transition-all px-5 py-3 font-semibold cursor-pointer flex items-center justify-center gap-2 whitespace-nowrap"
+                >
+                  {autonomousStatus?.isRunning || isTriggeringAutonomous ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 animate-spin" /> Processing AI Pipeline
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3 h-3" /> Force Run Autonomous Cycle
+                    </>
+                  )}
                 </button>
               </div>
             </div>

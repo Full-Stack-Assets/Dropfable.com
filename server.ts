@@ -43,6 +43,241 @@ const labelsMap: Record<string, string> = {
 };
 
 import fs from "fs";
+import { execSync } from "child_process";
+
+const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
+
+function loadArchive(): any[] {
+  try {
+    if (fs.existsSync(ARCHIVE_FILE)) {
+      const data = fs.readFileSync(ARCHIVE_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Failed to read archive_store.json", err);
+  }
+  return [];
+}
+
+function saveArchive(items: any[]) {
+  try {
+    fs.writeFileSync(ARCHIVE_FILE, JSON.stringify(items, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to write archive_store.json", err);
+  }
+}
+
+// Git configuration & initialization helper
+function configureGit() {
+  try {
+    try {
+      execSync("git config --global user.email 'autonomous-builder@dropkit.ai'");
+      execSync("git config --global user.name 'DropKit Autonomous Builder'");
+    } catch (_) {}
+    
+    if (!fs.existsSync(path.join(process.cwd(), ".git"))) {
+      console.log("[Git] Initializing local Git repository...");
+      execSync("git init", { stdio: "inherit" });
+    }
+  } catch (err: any) {
+    console.warn("[Git] Git setup/config skipped:", err.message);
+  }
+}
+
+// Push to GitHub helper
+function pushToGitHub(niche: string) {
+  try {
+    console.log("[Git] Committing and pushing autonomous batch for niche:", niche);
+    execSync("git add products/ archive_store.json queue_store.json", { stdio: "inherit" });
+    try {
+      execSync(`git commit -m "Autonomous hourly product update: ${niche}"`, { stdio: "inherit" });
+    } catch (commitErr: any) {
+      console.log("[Git] Nothing to commit or commit failed:", commitErr.message);
+    }
+    
+    const remoteOutput = execSync("git remote").toString().trim();
+    if (remoteOutput) {
+      execSync("git push origin main || git push origin master", { stdio: "inherit" });
+      console.log("[Git] Successfully pushed autonomous batch to GitHub remote!");
+    } else {
+      console.log("[Git] No remote configured. Changes committed locally.");
+    }
+  } catch (err: any) {
+    console.warn("[Git] Push to GitHub skipped or failed (expected if unauthorized or no remote):", err.message);
+  }
+}
+
+// Autonomous scheduled state
+const autonomousState = {
+  isRunning: false,
+  lastRunTime: null as string | null,
+  nextRunTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  currentNiche: null as string | null,
+  currentProductIndex: 0,
+  totalProducts: 6,
+  status: "idle" as "idle" | "brainstorming" | "generating" | "git-pushing" | "completed" | "failed",
+  error: null as string | null,
+  history: [] as Array<{ niche: string; timestamp: string; status: "success" | "failed"; error?: string }>
+};
+
+// Autonomous scheduled workflow
+async function runAutonomousWorkflow() {
+  if (autonomousState.isRunning) {
+    console.log("[Autonomous] Workflow already running, skipping.");
+    return;
+  }
+  
+  autonomousState.isRunning = true;
+  autonomousState.status = "brainstorming";
+  autonomousState.error = null;
+  console.log("[Autonomous] Starting scheduled hourly workflow...");
+  
+  let chosenNiche = "";
+  try {
+    configureGit();
+    
+    // Step 1: Brainstorm niche via Gemini
+    console.log("[Autonomous] Brainstorming fresh niche via Gemini...");
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: "Generate a highly specific, modern, trending digital product niche or target audience that has strong monetization potential right now. Return a JSON object with a single field 'niche' containing a short 3-5 word name for this target audience (e.g. 'Vegan Meal Prep Beginners', 'First-time Chicken Owners', 'ADHD College Students', 'No-code App Builders', 'Local Bakery Owners'). Do not return any other text, formatting, or placeholders.",
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              niche: { type: Type.STRING }
+            },
+            required: ["niche"]
+          }
+        }
+      });
+      const data = JSON.parse(response.text || "{}");
+      chosenNiche = data.niche || "";
+    } catch (err: any) {
+      console.warn("[Autonomous] Gemini brainstorming failed, picking from backup preset:", err.message);
+    }
+    
+    if (!chosenNiche) {
+      const presets = [
+        "SaaS Customer Success Managers",
+        "Home Mushroom Cultivators",
+        "First-time Chicken Owners",
+        "Shopify Dropshippers using AI",
+        "B2B Freelance Copywriters",
+        "Indoor Plant Parents in Small Apartments"
+      ];
+      chosenNiche = presets[Math.floor(Math.random() * presets.length)];
+    }
+    
+    autonomousState.currentNiche = chosenNiche;
+    autonomousState.status = "generating";
+    console.log(`[Autonomous] Niche chosen: "${chosenNiche}". Beginning synthesis of all 6 products...`);
+    
+    const productsToGenerate = ["planner", "prompts", "templates", "guide", "checklist", "swipe"];
+    autonomousState.totalProducts = productsToGenerate.length;
+    
+    const generatedProducts: any[] = [];
+    
+    for (let i = 0; i < productsToGenerate.length; i++) {
+      const productId = productsToGenerate[i];
+      autonomousState.currentProductIndex = i + 1;
+      console.log(`[Autonomous] Generating product ${i + 1}/${productsToGenerate.length}: ${productId} for ${chosenNiche}`);
+      
+      try {
+        const result = await manufactureProduct(productId, chosenNiche, undefined, "English");
+        result.originalNiche = chosenNiche;
+        generatedProducts.push({ productId, result });
+        
+        // Save to archive_store.json
+        const archive = loadArchive();
+        if (!archive.some(a => a.productTitle === result.productTitle)) {
+          archive.push(result);
+          saveArchive(archive);
+        }
+        
+        // Save as local files
+        const safeNiche = chosenNiche.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const dirPath = path.join(process.cwd(), "products", safeNiche);
+        fs.mkdirSync(dirPath, { recursive: true });
+        
+        const txtContent = `========================================================================
+Product Title: ${result.productTitle}
+Niche: ${chosenNiche}
+Product Type: ${labelsMap[productId]}
+Price Recommendation: ${result.priceRecommendationValue}
+========================================================================
+
+PRODUCT CONTENT:
+------------------------------------------------------------------------
+${result.productContent}
+
+------------------------------------------------------------------------
+SALES LISTINGS:
+------------------------------------------------------------------------
+Etsy Title:
+${result.etsyTitle}
+
+Etsy Tags:
+${(result.etsyTags || []).join(", ")}
+
+Etsy Description:
+${result.listingDescription}
+
+Gumroad Blurb:
+${result.gumroadBlurb}
+`;
+        fs.writeFileSync(path.join(dirPath, `${productId}.txt`), txtContent, "utf-8");
+        fs.writeFileSync(path.join(dirPath, `${productId}.json`), JSON.stringify(result, null, 2), "utf-8");
+        
+      } catch (productErr: any) {
+        console.error(`[Autonomous] Failed to generate ${productId} for ${chosenNiche}:`, productErr.message);
+      }
+    }
+    
+    if (generatedProducts.length > 0) {
+      autonomousState.status = "git-pushing";
+      pushToGitHub(chosenNiche);
+      
+      autonomousState.status = "completed";
+      autonomousState.lastRunTime = new Date().toISOString();
+      autonomousState.history.unshift({
+        niche: chosenNiche,
+        timestamp: new Date().toISOString(),
+        status: "success"
+      });
+    } else {
+      throw new Error("Zero products successfully synthesized.");
+    }
+    
+  } catch (err: any) {
+    console.error("[Autonomous] Workflow failure:", err);
+    autonomousState.status = "failed";
+    autonomousState.error = err.message || "Unknown background workflow failure";
+    autonomousState.history.unshift({
+      niche: chosenNiche || "Unknown",
+      timestamp: new Date().toISOString(),
+      status: "failed",
+      error: err.message
+    });
+  } finally {
+    autonomousState.isRunning = false;
+    autonomousState.nextRunTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    
+    if (autonomousState.history.length > 10) {
+      autonomousState.history = autonomousState.history.slice(0, 10);
+    }
+  }
+}
+
+// Scheduled interval: Hourly (every 60 minutes)
+setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
+
+// Run after a short delay on server boot
+setTimeout(() => {
+  runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
+}, 15000);
 
 interface Task {
   id: string;
@@ -332,6 +567,84 @@ app.delete("/api/queue/tasks/:id", (req, res) => {
   taskQueue = taskQueue.filter(t => t.id !== id);
   saveQueue(taskQueue);
   return res.json({ success: true });
+});
+
+// 3. Server-side Archive API endpoints
+app.get("/api/archive", (req, res) => {
+  const archive = loadArchive();
+  return res.json({ archive });
+});
+
+app.post("/api/archive", (req, res) => {
+  try {
+    const { item } = req.body;
+    if (!item || !item.productTitle) {
+      return res.status(400).json({ error: "Invalid product payload to archive." });
+    }
+    const archive = loadArchive();
+    const isAlreadySaved = archive.some(a => a.productTitle === item.productTitle);
+    if (!isAlreadySaved) {
+      archive.push(item);
+      saveArchive(archive);
+    }
+    return res.json({ success: true, archive });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to save item to server archive." });
+  }
+});
+
+app.post("/api/archive/sync", (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!items || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid sync request. 'items' array required." });
+    }
+    const serverArchive = loadArchive();
+    
+    // Merge client items into server archive, avoiding duplicates
+    let updated = [...serverArchive];
+    for (const clientItem of items) {
+      if (!clientItem || !clientItem.productTitle) continue;
+      const exists = updated.some(s => s.productTitle === clientItem.productTitle);
+      if (!exists) {
+        updated.push(clientItem);
+      }
+    }
+    
+    saveArchive(updated);
+    return res.json({ success: true, archive: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to synchronize archives." });
+  }
+});
+
+app.post("/api/archive/remove", (req, res) => {
+  try {
+    const { title } = req.body;
+    if (!title) {
+      return res.status(400).json({ error: "Product title is required to remove." });
+    }
+    let archive = loadArchive();
+    archive = archive.filter(a => a.productTitle !== title);
+    saveArchive(archive);
+    return res.json({ success: true, archive });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to remove item from archive." });
+  }
+});
+
+// 4. Autonomous Scheduler API endpoints
+app.get("/api/autonomous-status", (req, res) => {
+  return res.json(autonomousState);
+});
+
+app.post("/api/autonomous-trigger", (req, res) => {
+  if (autonomousState.isRunning) {
+    return res.status(400).json({ error: "Autonomous background generator is already actively running." });
+  }
+  // Run asynchronously in background
+  runAutonomousWorkflow().catch(err => console.error("[Autonomous] Triggered workflow failure:", err));
+  return res.json({ success: true, message: "Autonomous hourly product batch generator triggered." });
 });
 
 // Auto-run processing on server startup if any pending items exist
