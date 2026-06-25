@@ -885,11 +885,16 @@ ${item.productContent}
 
     // Generate one product, retrying once on a transient failure (e.g. a 504
     // timeout on a large product). Throws only if both attempts fail.
+    // Retries network errors and transient HTTP statuses (408/429/5xx) only;
+    // 4xx validation errors fail fast (retrying just re-sends an expensive call).
+    const isTransientStatus = (s: number) => s >= 500 || s === 408 || s === 429;
+
     const generateOne = async (productId: string, label: string, currentNiche: string) => {
       let lastErr: any;
       for (let attempt = 0; attempt < 2; attempt++) {
+        let response: Response;
         try {
-          const response = await fetch("/api/manufacture", {
+          response = await fetch("/api/manufacture", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -899,14 +904,29 @@ ${item.productContent}
               language: language !== "English" ? language : undefined,
             }),
           });
-          const data = await parseJsonResponse(response);
-          if (!response.ok) {
-            throw new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${label})`);
-          }
-          return data;
         } catch (e: any) {
-          lastErr = e;
+          lastErr = e; // network error — transient, retry
+          continue;
         }
+
+        let data: any = {};
+        let parseErr: any = null;
+        try {
+          data = await parseJsonResponse(response);
+        } catch (e: any) {
+          parseErr = e; // non-JSON body (e.g. a 504/timeout HTML page)
+        }
+
+        if (parseErr) {
+          lastErr = parseErr;
+          if (!isTransientStatus(response.status)) throw parseErr;
+          continue; // transient — retry
+        }
+        if (response.ok) return data;
+
+        const err = new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${label})`);
+        if (!isTransientStatus(response.status)) throw err; // 4xx — fail fast
+        lastErr = err; // transient — retry
       }
       throw lastErr;
     };
