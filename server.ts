@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 
 dotenv.config();
 
@@ -99,8 +98,14 @@ function configureGit() {
   }
 }
 
-// Push to GitHub helper
+// Push to GitHub helper. Auto-pushing to main caused repeated outages (it
+// overwrote the deploy config and deleted code), so it is OFF unless explicitly
+// enabled via ENABLE_AUTONOMOUS_GIT_PUSH=true.
 function pushToGitHub(niche: string) {
+  if (process.env.ENABLE_AUTONOMOUS_GIT_PUSH !== "true") {
+    console.log("[Git] Auto-push to main is disabled (set ENABLE_AUTONOMOUS_GIT_PUSH=true to enable).");
+    return;
+  }
   try {
     console.log("[Git] Committing and pushing autonomous batch for niche:", niche);
     execSync("git add products/ archive_store.json queue_store.json", { stdio: "inherit" });
@@ -154,12 +159,10 @@ async function runAutonomousWorkflow() {
     // Step 1: Brainstorm niche via Gemini
     console.log("[Autonomous] Brainstorming fresh niche via Gemini with robust fallback...");
     const baseBrainstormModels = [
-      "gemini-3.5-flash",
-      "gemini-3.1-flash-lite",
+      "gemini-2.5-flash-lite",
       "gemini-2.5-flash",
       "gemini-2.0-flash",
-      "gemini-1.5-flash",
-      "gemini-2.5-pro"
+      "gemini-1.5-flash"
     ];
     const brainstormModels = getOrderedModels(baseBrainstormModels);
 
@@ -313,13 +316,16 @@ ${result.gumroadBlurb}
   }
 }
 
-// Scheduled interval: Hourly (every 60 minutes)
-setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
-
-// Run after a short delay on server boot
-setTimeout(() => {
-  runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
-}, 15000);
+// Hourly autonomous workflow. DISABLED by default: it git-pushes to main, which
+// previously clobbered the repo. The /api/autonomous-trigger endpoint still lets
+// you run it manually. Enable the timer only with ENABLE_AUTONOMOUS=true, and
+// never on Vercel (serverless has no persistent timers or writable git).
+if (process.env.ENABLE_AUTONOMOUS === "true" && !process.env.VERCEL) {
+  setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
+  setTimeout(() => {
+    runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
+  }, 15000);
+}
 
 interface Task {
   id: string;
@@ -394,13 +400,15 @@ ${language && language !== 'English' ? `CRITICAL: You MUST translate and output 
 
 Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
 
+  // Lead with the models actually provisioned for this key, fastest first.
+  // gemini-3.5-flash / gemini-3.1-flash-lite return persistent 503/404 here, so
+  // they are not used (leading with them wasted every request on dead models —
+  // the health-tracker's cooldowns don't persist across serverless invocations).
   const baseModelsToTry = [
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-2.5-pro"
+    "gemini-1.5-flash"
   ];
   const modelsToTry = getOrderedModels(baseModelsToTry);
   let lastError: any = null;
@@ -702,13 +710,22 @@ app.post("/api/autonomous-trigger", (req, res) => {
   return res.json({ success: true, message: "Autonomous hourly product batch generator triggered." });
 });
 
-// Auto-run processing on server startup if any pending items exist
-processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
+// Auto-run queue processing on startup (standalone server only; serverless
+// functions have no persistent process or writable filesystem for the queue).
+if (!process.env.VERCEL) {
+  processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
+}
 
 
-// Setup Vite Dev Middleware / Static files serving
+// Standalone server bootstrap (dev: Vite middleware; prod: static dist/) + listen.
+// On Vercel the app runs as a serverless function (see api/index.ts) which
+// imports the exported `app`, so this bootstrap is skipped there.
 async function mountViteMiddleware() {
   if (process.env.NODE_ENV !== "production") {
+    // Dynamic import via a variable specifier so Vite (a devDependency) is never
+    // pulled into the production esbuild bundle or the Vercel function trace.
+    const viteSpecifier = "vite";
+    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -727,4 +744,10 @@ async function mountViteMiddleware() {
   });
 }
 
-mountViteMiddleware();
+// Vercel sets process.env.VERCEL; there the app is consumed as a serverless
+// handler and must not call listen().
+if (!process.env.VERCEL) {
+  mountViteMiddleware();
+}
+
+export default app;
