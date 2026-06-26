@@ -43,6 +43,7 @@ const labelsMap: Record<string, string> = {
 };
 
 import fs from "fs";
+import os from "os";
 import { execSync } from "child_process";
 
 // Model health tracking to dynamically deprioritize overloaded/503/429 models temporarily
@@ -87,7 +88,32 @@ async function generateText(params: { contents: any; config?: any }) {
   throw lastErr;
 }
 
-const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
+// Lightweight per-IP rate limit for the paid Gemini endpoints — defense against
+// runaway cost if the site is reachable publicly. In-memory, so it is per-instance
+// on serverless (not a global cap); back it with a shared store for a hard limit.
+// Tune via RATE_LIMIT_PER_MIN (default 20/min).
+const RL_WINDOW_MS = 60_000;
+const RL_MAX = Number(process.env.RATE_LIMIT_PER_MIN || 20);
+const rlHits = new Map<string, number[]>();
+function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const fwd = req.headers["x-forwarded-for"];
+  const ip = (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const hits = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
+  if (hits.length >= RL_MAX) {
+    return res.status(429).json({ error: "Too many requests — please wait a minute and try again." });
+  }
+  hits.push(now);
+  rlHits.set(ip, hits);
+  next();
+}
+
+// On Vercel the deployment filesystem is read-only except for the OS temp dir,
+// so JSON persistence writes would throw EROFS and silently fail. Route them to
+// a writable dir there. (Storage is per-instance/ephemeral on serverless — these
+// files back the autonomous/queue internals, not the user's localStorage archive.)
+const DATA_DIR = process.env.VERCEL ? os.tmpdir() : process.cwd();
+const ARCHIVE_FILE = path.join(DATA_DIR, "archive_store.json");
 
 function loadArchive(): any[] {
   try {
@@ -370,7 +396,7 @@ interface Task {
   completedAt?: string;
 }
 
-const DB_FILE = path.join(process.cwd(), "queue_store.json");
+const DB_FILE = path.join(DATA_DIR, "queue_store.json");
 
 function loadQueue(): Task[] {
   try {
@@ -584,7 +610,7 @@ async function processQueueRunner() {
 }
 
 // 1. Instant/Synchronous Manufacture Endpoint
-app.post("/api/manufacture", async (req, res) => {
+app.post("/api/manufacture", rateLimit, async (req, res) => {
   try {
     const { productId, niche, angle, language } = req.body;
     const data = await manufactureProduct(productId, niche, angle, language);
@@ -736,7 +762,7 @@ app.post("/api/notion/push", async (req, res) => {
   }
 });
 
-app.get("/api/trends", async (req, res) => {
+app.get("/api/trends", rateLimit, async (req, res) => {
   try {
     const response = await generateText({
       contents: "Return a JSON array of 5 currently trending digital product niches or target audiences, just 5 strings answering the query. Be specific, like 'ADHD Notion Creators', not just 'ADHD'.",
@@ -758,7 +784,7 @@ app.get("/api/trends", async (req, res) => {
   }
 });
 
-app.post("/api/image/generate", async (req, res) => {
+app.post("/api/image/generate", rateLimit, async (req, res) => {
   try {
     const { productTitle, niche } = req.body;
     
