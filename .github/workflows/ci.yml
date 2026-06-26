@@ -39,3 +39,10 @@ jobs:
         # Mirrors the esbuild step in vercel.json's buildCommand so a broken
         # server bundle (e.g. an undeclared dependency) fails CI, not the deploy.
         run: npx esbuild server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=server.generated.cjs
+
+      - name: Smoke test API routes
+        # Boots the bundled app and asserts every /api/* route is wired (returns
+        # JSON, not 404). Catches deleted/renamed routes a type-check can't.
+        env:
+          VERCEL: '1'
+        run: node scripts/smoke.cjs
