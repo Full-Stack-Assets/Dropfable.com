@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
+import { Client as NotionClient } from "@notionhq/client";
 
 dotenv.config();
 
@@ -57,6 +58,33 @@ function getOrderedModels(preferredModels: string[]): string[] {
 function markModelFailure(modelName: string, minutes = 5) {
   modelCooldowns[modelName] = Date.now() + minutes * 60 * 1000;
   console.warn(`[ModelTracker] Demoting ${modelName} for ${minutes} minutes due to a transient/overload error.`);
+}
+
+// Generate text with model fallback, leading with the models actually provisioned
+// for this key (fastest first) and demoting any that return transient/overload
+// errors. Used by the lightweight text endpoints (e.g. /api/trends).
+async function generateText(params: { contents: any; config?: any }) {
+  const models = getOrderedModels([
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
+  ]);
+  let lastErr: any;
+  for (const model of models) {
+    try {
+      return await ai.models.generateContent({ model, ...params });
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message ?? err);
+      if (/\b(429|500|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg)) {
+        markModelFailure(model);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
@@ -570,6 +598,207 @@ app.post("/api/manufacture", async (req, res) => {
 });
 
 // 2. Queue management endpoints
+// Restored frontend API routes (trends, image, Notion, Shopify) that the
+// autonomous rewrite dropped.
+app.post("/api/shopify/push", async (req, res) => {
+  try {
+    const { title, description, price } = req.body;
+    const token = process.env.SHOPIFY_ACCESS_TOKEN;
+    const domain = process.env.SHOPIFY_STORE_DOMAIN;
+
+    if (!token || !domain) {
+      return res.status(400).json({ error: "Missing SHOPIFY_ACCESS_TOKEN or SHOPIFY_STORE_DOMAIN in environment." });
+    }
+
+    const priceValue = price ? parseFloat(price.replace(/[^0-9.]/g, '')) || 19.99 : 19.99;
+
+    const query = `
+      mutation productCreate($input: ProductInput!) {
+        productCreate(input: $input) {
+          product {
+            id
+            title
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+    
+    // Shopify GraphQL API
+    const response = await fetch(`https://${domain}/admin/api/2024-01/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": token
+      },
+      body: JSON.stringify({
+        query,
+        variables: {
+          input: {
+            title: title,
+            descriptionHtml: description,
+            variants: [{
+              price: priceValue.toString()
+            }]
+          }
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(JSON.stringify(data));
+    }
+    
+    if (data.data?.productCreate?.userErrors?.length > 0) {
+      throw new Error(data.data.productCreate.userErrors[0].message);
+    }
+
+    const productId = data.data?.productCreate?.product?.id?.split('/').pop();
+    
+    res.json({ success: true, url: `https://${domain}/admin/products/${productId}` });
+  } catch (error: any) {
+    console.error("Shopify API Error:", error);
+    res.status(500).json({ error: error.message || "Failed to push to Shopify." });
+  }
+});
+
+app.post("/api/notion/push", async (req, res) => {
+  try {
+    const { title, content, targetAudience } = req.body;
+    const notionKey = process.env.NOTION_API_KEY;
+    const parentPageId = process.env.NOTION_PARENT_PAGE_ID;
+
+    if (!notionKey || !parentPageId) {
+      return res.status(400).json({ error: "Missing NOTION_API_KEY or NOTION_PARENT_PAGE_ID in environment." });
+    }
+
+    const notion = new NotionClient({ auth: notionKey });
+    
+    // Convert content text into rough Notion blocks
+    const children: any[] = [];
+    const lines = content.split('\n');
+    let currentParagraph = "";
+
+    const flushParagraph = () => {
+      if (currentParagraph.trim()) {
+        children.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: { rich_text: [{ type: 'text', text: { content: currentParagraph.substring(0, 2000) } }] }
+        });
+        currentParagraph = "";
+      }
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('# ')) {
+        flushParagraph();
+        children.push({ object: 'block', type: 'heading_1', heading_1: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^# /, '').substring(0, 2000) } }] } });
+      } else if (trimmed.startsWith('## ')) {
+        flushParagraph();
+        children.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^## /, '').substring(0, 2000) } }] } });
+      } else if (trimmed.startsWith('### ')) {
+        flushParagraph();
+        children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^### /, '').substring(0, 2000) } }] } });
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        flushParagraph();
+        children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^[-*] /, '').substring(0, 2000) } }] } });
+      } else if (trimmed === '') {
+        flushParagraph();
+      } else {
+        currentParagraph += (currentParagraph ? "\n" : "") + trimmed;
+      }
+    }
+    flushParagraph();
+
+    // Notion limits creation to 100 blocks at once in children array
+    const response = await notion.pages.create({
+      parent: { page_id: parentPageId },
+      properties: {
+        title: {
+          title: [
+            { text: { content: title.substring(0, 2000) } }
+          ]
+        }
+      },
+      children: children.slice(0, 100)
+    });
+
+    res.json({ success: true, url: (response as any).url });
+  } catch (error: any) {
+    console.error("Notion API Error:", error);
+    res.status(500).json({ error: error.message || "Failed to push to Notion." });
+  }
+});
+
+app.get("/api/trends", async (req, res) => {
+  try {
+    const response = await generateText({
+      contents: "Return a JSON array of 5 currently trending digital product niches or target audiences, just 5 strings answering the query. Be specific, like 'ADHD Notion Creators', not just 'ADHD'.",
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.STRING
+          }
+        }
+      }
+    });
+    const trends = JSON.parse(response.text || "[]");
+    res.json({ trends });
+  } catch (error: any) {
+    console.error("Trends Error:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch trends." });
+  }
+});
+
+app.post("/api/image/generate", async (req, res) => {
+  try {
+    const { productTitle, niche } = req.body;
+    
+    if (!productTitle) {
+      return res.status(400).json({ error: "Product title required for cover art generation." });
+    }
+
+    const prompt = `A clean, elegant, premium, modern graphical cover for a digital product targeting ${niche || 'creators'}. The product is named: "${productTitle}". Best suited for a digital download product card, minimal style.`;
+    
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [{ text: prompt }]
+      },
+      config: {
+        imageConfig: { aspectRatio: "4:3" }
+      }
+    });
+
+    let imageUrl = null;
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        const base64EncodeString = part.inlineData.data;
+        const mimeType = part.inlineData.mimeType || "image/jpeg";
+        imageUrl = `data:${mimeType};base64,${base64EncodeString}`;
+        break;
+      }
+    }
+
+    if (!imageUrl) {
+      throw new Error("No image generated");
+    }
+    
+    res.json({ imageUrl });
+  } catch (error: any) {
+    console.error("Image Generation Error:", error);
+    res.status(500).json({ error: error.message || "Failed to generate image." });
+  }
+});
+
 app.get("/api/queue", (req, res) => {
   res.json({ tasks: taskQueue });
 });
