@@ -1,0 +1,41 @@
+name: CI
+
+# Quality gate for every PR and push to main. This catches the failure modes
+# that took production down in the past: a merge that dropped a referenced
+# symbol (type-check), code importing a package missing from package.json
+# (install/type-check/build), and a broken Vercel serverless bundle (esbuild).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Lint & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npm run lint
+
+      - name: Build frontend + standalone server
+        run: npm run build
+
+      - name: Build Vercel serverless bundle
+        # Mirrors the esbuild step in vercel.json's buildCommand so a broken
+        # server bundle (e.g. an undeclared dependency) fails CI, not the deploy.
+        run: npx esbuild server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=server.generated.cjs
