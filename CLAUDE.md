@@ -152,3 +152,14 @@ exclusively through the Express API routes. **Never expose API keys to the clien
   permission.
 - Run `npm run lint` before committing.
 - Do not create pull requests unless explicitly asked.
+
+## CI
+
+- `.github/workflows/ci.yml` runs on every PR and push to `main`: `npm ci` →
+  `npm run lint` (tsc) → `npm run build` → the Vercel esbuild bundle. It exists
+  because past outages came from build-breaking merges (a dropped symbol, a
+  package imported but missing from `package.json`, a broken serverless bundle).
+  Keep it green; enable it as a required status check on `main`.
+- Be careful merging long-lived divergent branches into `main` — a bad
+  auto-resolution has silently deleted code and deploy config here before.
+  Let CI verify the result before merging.
