@@ -30,122 +30,11 @@ import {
   CheckCircle2
 } from "lucide-react";
 
-interface ProductType {
-  id: string;
-  ico: React.ReactNode;
-  name: string;
-  code: string;
-  spec: string;
-}
+import { PRODUCTS, PRESET_NICHES, NICHE_TREND_DATA, LOADER_MESSAGES, ARCHIVE_KEY, LEGACY_ARCHIVE_KEY } from "./constants";
+import { parseJsonResponse } from "./lib/http";
+import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
+import type { ProductType, ManufactureResult } from "./types";
 
-const PRODUCTS: ProductType[] = [
-  {
-    id: "planner",
-    ico: <Calendar className="w-5 h-5" />,
-    name: "Planner / Workbook",
-    code: "30-day structure",
-    spec: "30 daily interactive entries, weekly reflection reviews & comprehensive introduction"
-  },
-  {
-    id: "prompts",
-    ico: <Brain className="w-5 h-5" />,
-    name: "Prompt Pack",
-    code: "50 copy-paste prompts",
-    spec: "50 high-value ready-to-use bracketed prompts across 5 key niche categories"
-  },
-  {
-    id: "templates",
-    ico: <Mail className="w-5 h-5" />,
-    name: "Template Pack",
-    code: "25 fill-in scripts",
-    spec: "25 customizable captions, templates or message logs with custom blanks and strategies"
-  },
-  {
-    id: "guide",
-    ico: <BookOpen className="w-5 h-5" />,
-    name: "Mini-Guide / Book",
-    code: "~3k word deep-dive",
-    spec: "A complete non-fiction playbook including 6-8 chapters loaded with specific guidance"
-  },
-  {
-    id: "checklist",
-    ico: <CheckSquare className="w-5 h-5" />,
-    name: "Checklist System",
-    code: "10-part checklist package",
-    spec: "A synchronized set of 10 related checklists with sequential tasks and trigger index"
-  },
-  {
-    id: "swipe",
-    ico: <Layers className="w-5 h-5" />,
-    name: "Swipe File",
-    code: "75 creative hooks",
-    spec: "75 highly converting lines, email headers or openers with sectioned applicability guidance"
-  }
-];
-
-const PRESET_NICHES = [
-  "ADHD College Students",
-  "New Real Estate Agents",
-  "Pet Shop Owners",
-  "Self-Taught Indie Hackers",
-  "Vegan Meal Prep Beginners"
-];
-
-interface ManufactureResult {
-  productTitle: string;
-  productContent: string;
-  etsyTitle: string;
-  priceRecommendationValue: string;
-  listingDescription: string;
-  etsyTags: string[];
-  gumroadBlurb: string;
-  originalNiche?: string;
-}
-
-const NICHE_TREND_DATA = [
-  { intensity: 20 },
-  { intensity: 24 },
-  { intensity: 30 },
-  { intensity: 28 },
-  { intensity: 45 },
-  { intensity: 60 },
-  { intensity: 58 },
-  { intensity: 80 },
-  { intensity: 85 },
-  { intensity: 100 }
-];
-
-const LOADER_MESSAGES = [
-  "Setting up architecture...",
-  "Initiating high-value synthesis...",
-  "Conceptualizing structual solutions...",
-  "Drafting tailored expert content...",
-  "Formatting precise layout boundaries...",
-  "Aligning semantic search models...",
-  "Calibrating optimal price vectors...",
-  "Preparing final delivery payload..."
-];
-
-// Persisted archive key. Renamed from the legacy "dropkit_archive"; existing
-// archives are migrated to the new key on first load (see effect in App()).
-const ARCHIVE_KEY = "nichesmith_archive";
-const LEGACY_ARCHIVE_KEY = "dropkit_archive";
-
-// Safely read a fetch Response as JSON. When the backend is unreachable or
-// returns a non-JSON body (e.g. an HTML error/redirect/timeout page), the native
-// Response.json() throws a cryptic, browser-specific SyntaxError — on iOS Safari
-// "The string did not match the expected pattern." Reading the body as text
-// first lets us surface an actionable message instead.
-async function parseJsonResponse(res: Response): Promise<any> {
-  const text = await res.text();
-  try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(
-      `The server returned an unexpected response (HTTP ${res.status}). The API may be unavailable — please try again.`
-    );
-  }
-}
 export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<ProductType>(PRODUCTS[0]);
   const [niche, setNiche] = useState("");
@@ -465,196 +354,23 @@ export default function App() {
     }, 2000);
   };
 
-  const handleDownloadProduct = (item: ManufactureResult) => {
-    const fileContent = `=== DIGITAL PRODUCT ===
-TITLE: ${item.productTitle}
-TYPE: ${selectedProduct.name}
-AUDIENCE: ${item.originalNiche || niche}
-${angle ? `ANGLE: ${angle}` : ""}
-========================
+  const handleDownloadProduct = (item: ManufactureResult) =>
+    exportProductTxt(item, { productTypeName: selectedProduct.name, niche, angle });
 
-${item.productContent}
+  const handleDownloadHTML = (item: ManufactureResult) => exportProductHtml(item);
 
-========================
-© Manufactured by DropKit Digital Factory.`;
-
-    const blob = new Blob([fileContent], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    
-    const safeTitle = item.productTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-    
-    link.download = `${safeTitle || "dropkit-product"}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadHTML = (item: ManufactureResult) => {
-    const safeTitle = item.productTitle.replace(/<[^>]*>?/gm, '') || "dropkit-product";
-    const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>\${safeTitle}</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f9fafb; color: #111827; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; }
-        h1 { font-size: 2.25rem; font-weight: 800; margin-bottom: 1rem; }
-        .niche { color: #6b7280; font-size: 1rem; margin-bottom: 2rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-        .content { background: white; padding: 2.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); white-space: pre-wrap; font-size: 1.125rem; }
-        .footer { margin-top: 3rem; text-align: center; color: #9ca3af; font-size: 0.875rem; }
-    </style>
-</head>
-<body>
-    <h1>\${safeTitle}</h1>
-    <div class="niche">Target Audience: \${item.originalNiche || "General"}</div>
-    <div class="content">\${item.productContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
-    <div class="footer">Manufactured by DropKit Digital Factory</div>
-</body>
-</html>`;
-
-    const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `\${safeTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadPDF = (item: ManufactureResult) => {
-    const doc = new jsPDF();
-    
-    const addFooter = () => {
-      doc.setFontSize(10);
-      doc.setTextColor(150);
-      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
-      doc.text(footerText, 105, 285, { align: "center" });
-      doc.setTextColor(0);
-      doc.setFontSize(11);
-    };
-
-    // Title Page
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(24);
-    
-    // Use splitTextToSize to handle very long titles
-    const titleLines = doc.splitTextToSize(item.productTitle, 180);
-    doc.text(titleLines, 105, 100, { align: "center" });
-    
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(14);
-    doc.text(`Target Audience: ${item.originalNiche || niche || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
-
-    addFooter();
-
-    // Content Pages
-    doc.addPage();
-    doc.setTextColor(0);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    addFooter();
-    
-    const textLines = doc.splitTextToSize(item.productContent, 180);
-    
-    let y = 20;
-    for (let i = 0; i < textLines.length; i++) {
-      if (y > 275) {
-        doc.addPage();
-        addFooter();
-        y = 20;
-      }
-      doc.text(textLines[i], 15, y);
-      y += 6;
-    }
-    
-    const safeTitle = item.productTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-
-    doc.save(`${safeTitle || "dropkit-product"}.pdf`);
-  };
+  const handleDownloadPDF = (item: ManufactureResult) =>
+    exportProductPdf(item, { watermarkText, niche });
 
   const handleDownloadMultiPDF = () => {
     if (selectedArchiveIndices.length === 0) return;
-    const doc = new jsPDF();
-    let isFirst = true;
-
-    const addFooter = () => {
-      doc.setFontSize(10);
-      doc.setTextColor(150);
-      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
-      doc.text(footerText, 105, 285, { align: "center" });
-      doc.setTextColor(0);
-      doc.setFontSize(11);
-    };
-
-    selectedArchiveIndices.forEach((idx) => {
-      const item = archivedItems[idx];
-      if (!isFirst) doc.addPage();
-      isFirst = false;
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(24);
-      const titleLines = doc.splitTextToSize(item.productTitle, 180);
-      doc.text(titleLines, 105, 100, { align: "center" });
-
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(14);
-      doc.text(`Target Audience: ${item.originalNiche || item.productTitle || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
-
-      addFooter();
-
-      doc.addPage();
-      doc.setTextColor(0);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(11);
-      addFooter();
-
-      let y = 20;
-      const textLines = doc.splitTextToSize(item.productContent, 180);
-      for (let i = 0; i < textLines.length; i++) {
-        if (y > 275) {
-          doc.addPage();
-          addFooter();
-          y = 20;
-        }
-        doc.text(textLines[i], 15, y);
-        y += 6;
-      }
-    });
-
-    doc.save("dropkit-batch-archive.pdf");
+    exportBatchPdf(selectedArchiveIndices.map((idx) => archivedItems[idx]), { watermarkText });
     setSelectedArchiveIndices([]);
   };
 
   const handleDownloadMetadataCSV = () => {
     if (archivedItems.length === 0) return;
-    const headers = ["Title", "Niche", "Price", "Gumroad Blurb"];
-    const rows = archivedItems.map(item => [
-      `"${item.productTitle.replace(/"/g, '""')}"`,
-      `"${item.originalNiche || ""}"`,
-      `"${item.priceRecommendationValue}"`,
-      `"${item.gumroadBlurb.replace(/"/g, '""')}"`
-    ]);
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.href = encodedUri;
-    link.download = "dropkit_metadata.csv";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    exportMetadataCsv(archivedItems);
   };
 
   const triggerSubmit = async () => {
