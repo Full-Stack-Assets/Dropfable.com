@@ -93,7 +93,7 @@ async function main() {
     await page.getByText(/Archive \(/).first().click();
     await page.getByText("UI Smoke Test Product").first().waitFor({ timeout: 10000 });
 
-    for (const [label, name] of [["TXT", /TXT/i], ["PDF", /PDF/i]]) {
+    for (const [label, name] of [["TXT", /TXT/i], ["HTML", /HTML/i], ["PDF", /\.PDF/i]]) {
       try {
         const fn = await expectDownload(page, name);
         console.log(`PASS export ${label} -> ${fn}`);

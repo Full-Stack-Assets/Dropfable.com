@@ -32,6 +32,7 @@ import {
 
 import { PRODUCTS, PRESET_NICHES, NICHE_TREND_DATA, LOADER_MESSAGES, ARCHIVE_KEY, LEGACY_ARCHIVE_KEY } from "./constants";
 import { parseJsonResponse } from "./lib/http";
+import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
 import type { ProductType, ManufactureResult } from "./types";
 
 export default function App() {
@@ -353,196 +354,23 @@ export default function App() {
     }, 2000);
   };
 
-  const handleDownloadProduct = (item: ManufactureResult) => {
-    const fileContent = `=== DIGITAL PRODUCT ===
-TITLE: ${item.productTitle}
-TYPE: ${selectedProduct.name}
-AUDIENCE: ${item.originalNiche || niche}
-${angle ? `ANGLE: ${angle}` : ""}
-========================
+  const handleDownloadProduct = (item: ManufactureResult) =>
+    exportProductTxt(item, { productTypeName: selectedProduct.name, niche, angle });
 
-${item.productContent}
+  const handleDownloadHTML = (item: ManufactureResult) => exportProductHtml(item);
 
-========================
-© Manufactured by DropKit Digital Factory.`;
-
-    const blob = new Blob([fileContent], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    
-    const safeTitle = item.productTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-    
-    link.download = `${safeTitle || "dropkit-product"}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadHTML = (item: ManufactureResult) => {
-    const safeTitle = item.productTitle.replace(/<[^>]*>?/gm, '') || "dropkit-product";
-    const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>\${safeTitle}</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f9fafb; color: #111827; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; }
-        h1 { font-size: 2.25rem; font-weight: 800; margin-bottom: 1rem; }
-        .niche { color: #6b7280; font-size: 1rem; margin-bottom: 2rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-        .content { background: white; padding: 2.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); white-space: pre-wrap; font-size: 1.125rem; }
-        .footer { margin-top: 3rem; text-align: center; color: #9ca3af; font-size: 0.875rem; }
-    </style>
-</head>
-<body>
-    <h1>\${safeTitle}</h1>
-    <div class="niche">Target Audience: \${item.originalNiche || "General"}</div>
-    <div class="content">\${item.productContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
-    <div class="footer">Manufactured by DropKit Digital Factory</div>
-</body>
-</html>`;
-
-    const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `\${safeTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadPDF = (item: ManufactureResult) => {
-    const doc = new jsPDF();
-    
-    const addFooter = () => {
-      doc.setFontSize(10);
-      doc.setTextColor(150);
-      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
-      doc.text(footerText, 105, 285, { align: "center" });
-      doc.setTextColor(0);
-      doc.setFontSize(11);
-    };
-
-    // Title Page
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(24);
-    
-    // Use splitTextToSize to handle very long titles
-    const titleLines = doc.splitTextToSize(item.productTitle, 180);
-    doc.text(titleLines, 105, 100, { align: "center" });
-    
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(14);
-    doc.text(`Target Audience: ${item.originalNiche || niche || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
-
-    addFooter();
-
-    // Content Pages
-    doc.addPage();
-    doc.setTextColor(0);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    addFooter();
-    
-    const textLines = doc.splitTextToSize(item.productContent, 180);
-    
-    let y = 20;
-    for (let i = 0; i < textLines.length; i++) {
-      if (y > 275) {
-        doc.addPage();
-        addFooter();
-        y = 20;
-      }
-      doc.text(textLines[i], 15, y);
-      y += 6;
-    }
-    
-    const safeTitle = item.productTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-
-    doc.save(`${safeTitle || "dropkit-product"}.pdf`);
-  };
+  const handleDownloadPDF = (item: ManufactureResult) =>
+    exportProductPdf(item, { watermarkText, niche });
 
   const handleDownloadMultiPDF = () => {
     if (selectedArchiveIndices.length === 0) return;
-    const doc = new jsPDF();
-    let isFirst = true;
-
-    const addFooter = () => {
-      doc.setFontSize(10);
-      doc.setTextColor(150);
-      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
-      doc.text(footerText, 105, 285, { align: "center" });
-      doc.setTextColor(0);
-      doc.setFontSize(11);
-    };
-
-    selectedArchiveIndices.forEach((idx) => {
-      const item = archivedItems[idx];
-      if (!isFirst) doc.addPage();
-      isFirst = false;
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(24);
-      const titleLines = doc.splitTextToSize(item.productTitle, 180);
-      doc.text(titleLines, 105, 100, { align: "center" });
-
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(14);
-      doc.text(`Target Audience: ${item.originalNiche || item.productTitle || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
-
-      addFooter();
-
-      doc.addPage();
-      doc.setTextColor(0);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(11);
-      addFooter();
-
-      let y = 20;
-      const textLines = doc.splitTextToSize(item.productContent, 180);
-      for (let i = 0; i < textLines.length; i++) {
-        if (y > 275) {
-          doc.addPage();
-          addFooter();
-          y = 20;
-        }
-        doc.text(textLines[i], 15, y);
-        y += 6;
-      }
-    });
-
-    doc.save("dropkit-batch-archive.pdf");
+    exportBatchPdf(selectedArchiveIndices.map((idx) => archivedItems[idx]), { watermarkText });
     setSelectedArchiveIndices([]);
   };
 
   const handleDownloadMetadataCSV = () => {
     if (archivedItems.length === 0) return;
-    const headers = ["Title", "Niche", "Price", "Gumroad Blurb"];
-    const rows = archivedItems.map(item => [
-      `"${item.productTitle.replace(/"/g, '""')}"`,
-      `"${item.originalNiche || ""}"`,
-      `"${item.priceRecommendationValue}"`,
-      `"${item.gumroadBlurb.replace(/"/g, '""')}"`
-    ]);
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.href = encodedUri;
-    link.download = "dropkit_metadata.csv";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    exportMetadataCsv(archivedItems);
   };
 
   const triggerSubmit = async () => {
