@@ -46,3 +46,12 @@ jobs:
         env:
           VERCEL: '1'
         run: node scripts/smoke.cjs
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: UI smoke test (client-side exports)
+        # Launches the built frontend in Chromium and asserts the TXT/PDF export
+        # buttons actually produce downloads — browser-only behavior that the
+        # type-check and API smoke test can't cover.
+        run: node scripts/ui-smoke.mjs
