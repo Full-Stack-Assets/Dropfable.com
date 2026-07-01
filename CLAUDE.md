@@ -107,9 +107,9 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - `ManufactureResult` (in `src/App.tsx`) is the canonical shape returned by
   `/api/manufacture` and stored in the archive. If you change the response schema in
   `server.ts`, update this interface too.
-- The **archive** persists to `localStorage` under the key **`nichesmith_archive`**
-  (the constant `ARCHIVE_KEY`; the legacy `dropkit_archive` key is migrated on first
-  load).
+- The **archive** persists to `localStorage` under the key **`dropkit_archive`**
+  (the `ARCHIVE_KEY` constant in `src/constants.tsx` — the single source of truth;
+  don't hardcode the literal). It also syncs with the server archive via `/api/archive`.
   Helpers handle save/remove/import/backup/version history — keep all reads/writes
   going through that single key.
 

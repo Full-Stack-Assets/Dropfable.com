@@ -1,27 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { jsPDF } from "jspdf";
 import ReactMarkdown from "react-markdown";
-import { LineChart, Line, ResponsiveContainer, YAxis } from "recharts";
-import { 
-  Sparkles, 
-  Download, 
-  Copy, 
-  Check, 
-  AlertCircle, 
-  Calendar, 
-  Brain, 
-  Mail, 
-  BookOpen, 
-  CheckSquare, 
-  Layers, 
-  Coins, 
-  Clock, 
-  ArrowRight, 
-  Volume2, 
-  Info,
+import {
+  Sparkles,
+  Download,
+  Copy,
+  Check,
+  AlertCircle,
+  Layers,
+  Coins,
+  Clock,
+  ArrowRight,
   ExternalLink,
-  Plus,
   Save,
   Trash2,
   FileText,
@@ -30,7 +20,7 @@ import {
   CheckCircle2
 } from "lucide-react";
 
-import { PRODUCTS, PRESET_NICHES, NICHE_TREND_DATA, LOADER_MESSAGES, ARCHIVE_KEY, LEGACY_ARCHIVE_KEY } from "./constants";
+import { PRODUCTS, PRESET_NICHES, LOADER_MESSAGES, ARCHIVE_KEY } from "./constants";
 import { parseJsonResponse } from "./lib/http";
 import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
 import { Header } from "./components/Header";
@@ -61,7 +51,6 @@ export default function App() {
   
   const [language, setLanguage] = useState("English");
   const [watermarkText, setWatermarkText] = useState("");
-  const [generateAllProducts, setGenerateAllProducts] = useState(false);
 
   const [queueView, setQueueView] = useState(false);
   const [queueTasks, setQueueTasks] = useState<any[]>([]);
@@ -174,7 +163,7 @@ export default function App() {
       const res = await fetch("/api/archive");
       if (res.ok) {
         const { archive: serverArchive } = await res.json();
-        const localSaved = localStorage.getItem('dropkit_archive');
+        const localSaved = localStorage.getItem(ARCHIVE_KEY);
         let localArchive: ManufactureResult[] = [];
         if (localSaved) {
           try { localArchive = JSON.parse(localSaved); } catch (e) {}
@@ -189,15 +178,15 @@ export default function App() {
         if (response.ok) {
           const { archive: mergedArchive } = await response.json();
           setArchivedItems(mergedArchive);
-          localStorage.setItem('dropkit_archive', JSON.stringify(mergedArchive));
+          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(mergedArchive));
         } else {
           setArchivedItems(serverArchive);
-          localStorage.setItem('dropkit_archive', JSON.stringify(serverArchive));
+          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(serverArchive));
         }
       }
     } catch (err) {
       console.error("Failed to sync archive:", err);
-      const localSaved = localStorage.getItem('dropkit_archive');
+      const localSaved = localStorage.getItem(ARCHIVE_KEY);
       if (localSaved) {
         try { setArchivedItems(JSON.parse(localSaved)); } catch (e) {}
       }
@@ -247,7 +236,7 @@ export default function App() {
     if (!isAlreadySaved) {
       const updated = [...archivedItems, item];
       setArchivedItems(updated);
-      localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
       
       try {
         await fetch("/api/archive", {
@@ -265,7 +254,7 @@ export default function App() {
     const item = archivedItems[index];
     const updated = archivedItems.filter((_, i) => i !== index);
     setArchivedItems(updated);
-    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
     setSelectedArchiveIndices(prev => prev.filter(i => i !== index).map(i => i > index ? i - 1 : i));
     
     if (item && item.productTitle) {
@@ -390,7 +379,7 @@ export default function App() {
 
     const newResults: ManufactureResult[] = [];
     const failures: string[] = [];
-    const productsToProcess = generateAllProducts ? PRODUCTS : [selectedProduct];
+    const productsToProcess = [selectedProduct];
     let currentIdx = 0;
     const totalSteps = nichesToProcess.length * productsToProcess.length;
 
