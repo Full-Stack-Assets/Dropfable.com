@@ -1,27 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { jsPDF } from "jspdf";
 import ReactMarkdown from "react-markdown";
-import { LineChart, Line, ResponsiveContainer, YAxis } from "recharts";
-import { 
-  Sparkles, 
-  Download, 
-  Copy, 
-  Check, 
-  AlertCircle, 
-  Calendar, 
-  Brain, 
-  Mail, 
-  BookOpen, 
-  CheckSquare, 
-  Layers, 
-  Coins, 
-  Clock, 
-  ArrowRight, 
-  Volume2, 
-  Info,
+import {
+  Sparkles,
+  Download,
+  Copy,
+  Check,
+  AlertCircle,
+  Layers,
+  Coins,
+  Clock,
+  ArrowRight,
   ExternalLink,
-  Plus,
   Save,
   Trash2,
   FileText,
@@ -30,9 +20,10 @@ import {
   CheckCircle2
 } from "lucide-react";
 
-import { PRODUCTS, PRESET_NICHES, NICHE_TREND_DATA, LOADER_MESSAGES, ARCHIVE_KEY, LEGACY_ARCHIVE_KEY } from "./constants";
+import { PRODUCTS, PRESET_NICHES, LOADER_MESSAGES, ARCHIVE_KEY } from "./constants";
 import { parseJsonResponse } from "./lib/http";
 import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
+import { Header } from "./components/Header";
 import type { ProductType, ManufactureResult } from "./types";
 
 export default function App() {
@@ -60,7 +51,6 @@ export default function App() {
   
   const [language, setLanguage] = useState("English");
   const [watermarkText, setWatermarkText] = useState("");
-  const [generateAllProducts, setGenerateAllProducts] = useState(false);
 
   const [queueView, setQueueView] = useState(false);
   const [queueTasks, setQueueTasks] = useState<any[]>([]);
@@ -173,7 +163,7 @@ export default function App() {
       const res = await fetch("/api/archive");
       if (res.ok) {
         const { archive: serverArchive } = await res.json();
-        const localSaved = localStorage.getItem('dropkit_archive');
+        const localSaved = localStorage.getItem(ARCHIVE_KEY);
         let localArchive: ManufactureResult[] = [];
         if (localSaved) {
           try { localArchive = JSON.parse(localSaved); } catch (e) {}
@@ -188,15 +178,15 @@ export default function App() {
         if (response.ok) {
           const { archive: mergedArchive } = await response.json();
           setArchivedItems(mergedArchive);
-          localStorage.setItem('dropkit_archive', JSON.stringify(mergedArchive));
+          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(mergedArchive));
         } else {
           setArchivedItems(serverArchive);
-          localStorage.setItem('dropkit_archive', JSON.stringify(serverArchive));
+          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(serverArchive));
         }
       }
     } catch (err) {
       console.error("Failed to sync archive:", err);
-      const localSaved = localStorage.getItem('dropkit_archive');
+      const localSaved = localStorage.getItem(ARCHIVE_KEY);
       if (localSaved) {
         try { setArchivedItems(JSON.parse(localSaved)); } catch (e) {}
       }
@@ -246,7 +236,7 @@ export default function App() {
     if (!isAlreadySaved) {
       const updated = [...archivedItems, item];
       setArchivedItems(updated);
-      localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
       
       try {
         await fetch("/api/archive", {
@@ -264,7 +254,7 @@ export default function App() {
     const item = archivedItems[index];
     const updated = archivedItems.filter((_, i) => i !== index);
     setArchivedItems(updated);
-    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
     setSelectedArchiveIndices(prev => prev.filter(i => i !== index).map(i => i > index ? i - 1 : i));
     
     if (item && item.productTitle) {
@@ -389,7 +379,7 @@ export default function App() {
 
     const newResults: ManufactureResult[] = [];
     const failures: string[] = [];
-    const productsToProcess = generateAllProducts ? PRODUCTS : [selectedProduct];
+    const productsToProcess = [selectedProduct];
     let currentIdx = 0;
     const totalSteps = nichesToProcess.length * productsToProcess.length;
 
@@ -485,52 +475,15 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0A0A0A] text-[#E0E0E0] font-sans flex flex-col selection:bg-white/10 selection:text-white">
       {/* Header Sticky Bar */}
-      <header className="sticky top-0 z-50 bg-[#0A0A0A]/90 backdrop-blur-md border-b border-white/10 flex-shrink-0">
-        <div className="max-w-[1200px] mx-auto px-6 sm:px-10 py-6 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-0">
-          <div className="flex items-center gap-8">
-            <div className="text-[10px] sm:text-xs tracking-[0.4em] font-medium uppercase text-white/90 flex items-center gap-4">
-              <span>DropKit</span>
-              <span className="text-white/30 hidden sm:inline">/ The Factory</span>
-            </div>
-            {/* Trending Niche Intensity Sparkline */}
-            <div className="hidden lg:flex flex-col w-24 opacity-80 border-l border-white/10 pl-6 ml-2">
-              <span className="text-[8px] uppercase tracking-widest text-white/40 mb-1 flex items-center gap-1">Trend <Sparkles className="w-2 h-2"/></span>
-              <div className="h-4 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={NICHE_TREND_DATA}>
-                    <YAxis domain={['dataMin', 'dataMax']} hide />
-                    <Line type="monotone" dataKey="intensity" stroke="#ffffff" strokeWidth={1} dot={false} strokeOpacity={0.6} isAnimationActive={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-          
-          <div className="flex gap-10 text-[9px] uppercase tracking-[0.3em] text-white/50">
-            <span 
-              onClick={() => { setArchiveView(false); setQueueView(false); }}
-              className={`pb-1 cursor-pointer transition-colors ${!archiveView && !queueView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
-            >
-              Manufacture
-            </span>
-            <span 
-              onClick={() => { setArchiveView(false); setQueueView(true); }}
-              className={`pb-1 cursor-pointer transition-colors ${queueView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
-            >
-              Queue ({queueTasks.filter(t => t.status === 'pending' || t.status === 'processing').length})
-            </span>
-            <span 
-              onClick={() => { setArchiveView(true); setQueueView(false); }}
-              className={`pb-1 cursor-pointer transition-colors ${archiveView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
-            >
-              Archive ({archivedItems.length})
-            </span>
-          </div>
-          <div className="hidden sm:flex text-[9px] uppercase tracking-widest text-white/40 border border-white/10 px-4 py-2 items-center justify-center hover:bg-white/5 transition-colors">
-            Mk I. System
-          </div>
-        </div>
-      </header>
+      <Header
+        archiveView={archiveView}
+        queueView={queueView}
+        pendingCount={queueTasks.filter(t => t.status === "pending" || t.status === "processing").length}
+        archiveCount={archivedItems.length}
+        onManufacture={() => { setArchiveView(false); setQueueView(false); }}
+        onQueue={() => { setArchiveView(false); setQueueView(true); }}
+        onArchive={() => { setArchiveView(true); setQueueView(false); }}
+      />
 
       {/* Main Container */}
       <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-16 sm:py-24">

@@ -105,6 +105,13 @@ function rateLimit(req: express.Request, res: express.Response, next: express.Ne
   }
   hits.push(now);
   rlHits.set(ip, hits);
+  // Evict IPs whose window has fully expired so the map can't grow unbounded on
+  // a long-running server.
+  if (rlHits.size > 1000) {
+    for (const [key, times] of rlHits) {
+      if (times.every((t) => now - t >= RL_WINDOW_MS)) rlHits.delete(key);
+    }
+  }
   next();
 }
 
@@ -694,7 +701,7 @@ app.post("/api/shopify/push", async (req, res) => {
 
 app.post("/api/notion/push", async (req, res) => {
   try {
-    const { title, content, targetAudience } = req.body;
+    const { title, content } = req.body;
     const notionKey = process.env.NOTION_API_KEY;
     const parentPageId = process.env.NOTION_PARENT_PAGE_ID;
 

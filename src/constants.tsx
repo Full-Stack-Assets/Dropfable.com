@@ -82,7 +82,6 @@ export const LOADER_MESSAGES = [
   "Preparing final delivery payload..."
 ];
 
-// Persisted archive key. Renamed from the legacy "dropkit_archive"; existing
-// archives are migrated to the new key on first load (see effect in App()).
-export const ARCHIVE_KEY = "nichesmith_archive";
-export const LEGACY_ARCHIVE_KEY = "dropkit_archive";
+// localStorage key the client archive persists under. Single source of truth so
+// reads/writes can't drift (they previously hardcoded the literal in 6 places).
+export const ARCHIVE_KEY = "dropkit_archive";
