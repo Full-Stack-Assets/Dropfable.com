@@ -3,13 +3,22 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Client as NotionClient } from "@notionhq/client";
+import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
+// The Stripe webhook needs the raw request body to verify signatures, so it must
+// be registered before the JSON body parser. No-op unless billing is enabled.
+registerBillingWebhook(app);
+
 app.use(express.json({ limit: "15mb" }));
+
+// JSON billing routes (config/signup/account/checkout/portal). The config route
+// is always live; the rest are only registered when BILLING_ENABLED=true.
+registerBillingRoutes(app);
 
 // Initialize the GoogleGenAI client on the server
 // API key is fetched from process.env.GEMINI_API_KEY, which is supplied by AI Studio
@@ -617,7 +626,7 @@ async function processQueueRunner() {
 }
 
 // 1. Instant/Synchronous Manufacture Endpoint
-app.post("/api/manufacture", rateLimit, async (req, res) => {
+app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
   try {
     const { productId, niche, angle, language } = req.body;
     const data = await manufactureProduct(productId, niche, angle, language);
@@ -791,7 +800,7 @@ app.get("/api/trends", rateLimit, async (req, res) => {
   }
 });
 
-app.post("/api/image/generate", rateLimit, async (req, res) => {
+app.post("/api/image/generate", rateLimit, requireQuota(), async (req, res) => {
   try {
     const { productTitle, niche } = req.body;
     

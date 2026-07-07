@@ -28,6 +28,9 @@ import { parseJsonResponse } from "./lib/http";
 import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
 import { exportSalesKit, exportArchiveZip } from "./lib/salesKit";
 import { Header } from "./components/Header";
+import { Billing } from "./components/Billing";
+import { fetchBillingConfig, fetchAccount, authHeaders } from "./lib/billingClient";
+import type { BillingConfig, AccountInfo } from "./lib/billingClient";
 import type { ProductType, ManufactureResult } from "./types";
 
 export default function App() {
@@ -66,6 +69,12 @@ export default function App() {
   // Cover art + bundle export state. Keyed by card index for per-card spinners.
   const [isGeneratingCover, setIsGeneratingCover] = useState<Record<number, boolean>>({});
   const [isZippingAll, setIsZippingAll] = useState(false);
+
+  // SaaS billing (inert unless the server reports BILLING_ENABLED). When enabled,
+  // a Pricing tab appears and the metered endpoints carry the caller's API key.
+  const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null);
+  const [billingAccount, setBillingAccount] = useState<AccountInfo | null>(null);
+  const [pricingView, setPricingView] = useState(false);
   // Live trending niches from /api/trends, fetched once and cached for the
   // suggestion dropdown (replaces the old hardcoded mock list).
   const [trendingNiches, setTrendingNiches] = useState<string[]>([]);
@@ -78,7 +87,7 @@ export default function App() {
     try {
       const res = await fetch("/api/image/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ productTitle: item.productTitle, niche: item.originalNiche || niche }),
       });
       const data = await parseJsonResponse(res);
@@ -249,6 +258,17 @@ export default function App() {
     fetchQueue();
     fetchAutonomousStatus();
     syncArchive();
+  }, []);
+
+  // Load billing config once; if enabled, resolve any stored API key to an account.
+  useEffect(() => {
+    (async () => {
+      const cfg = await fetchBillingConfig();
+      if (!cfg?.enabled) return;
+      setBillingConfig(cfg);
+      const acct = await fetchAccount();
+      if (acct) setBillingAccount(acct);
+    })();
   }, []);
 
   useEffect(() => {
@@ -461,7 +481,7 @@ export default function App() {
         try {
           response = await fetch("/api/manufacture", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...authHeaders() },
             body: JSON.stringify({
               productId,
               niche: currentNiche,
@@ -529,6 +549,8 @@ export default function App() {
     } finally {
       setLoading(false);
       setBatchProgress(null);
+      // Refresh the metered usage counter so the Pricing tab stays accurate.
+      if (billingConfig?.enabled) fetchAccount().then(a => { if (a) setBillingAccount(a); });
     }
   };
 
@@ -543,18 +565,30 @@ export default function App() {
       <Header
         archiveView={archiveView}
         queueView={queueView}
+        pricingView={pricingView}
+        showPricing={!!billingConfig?.enabled}
         pendingCount={queueTasks.filter(t => t.status === "pending" || t.status === "processing").length}
         archiveCount={archivedItems.length}
-        onManufacture={() => { setArchiveView(false); setQueueView(false); }}
-        onQueue={() => { setArchiveView(false); setQueueView(true); }}
-        onArchive={() => { setArchiveView(true); setQueueView(false); }}
+        onManufacture={() => { setArchiveView(false); setQueueView(false); setPricingView(false); }}
+        onQueue={() => { setArchiveView(false); setQueueView(true); setPricingView(false); }}
+        onArchive={() => { setArchiveView(true); setQueueView(false); setPricingView(false); }}
+        onPricing={() => { setArchiveView(false); setQueueView(false); setPricingView(true); fetchAccount().then(a => { if (a) setBillingAccount(a); }); }}
       />
 
       {/* Main Container */}
       <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-16 sm:py-24">
-        
+
+        {/* Pricing / Account (SaaS billing — only reachable when enabled) */}
+        {pricingView && billingConfig && (
+          <Billing
+            config={billingConfig}
+            account={billingAccount}
+            onAccountChange={setBillingAccount}
+          />
+        )}
+
         {/* Pitch Hero */}
-        {!archiveView && !queueView && (
+        {!archiveView && !queueView && !pricingView && (
           <>
             <section className="flex flex-col items-center text-center max-w-3xl mx-auto mb-20 sm:mb-32">
               <div className="w-px h-16 bg-gradient-to-b from-transparent to-white/20 mb-8 pb-4"></div>
@@ -1333,7 +1367,7 @@ export default function App() {
 
         {/* Payload Display Layer */}
         <AnimatePresence>
-          {!queueView && (archiveView ? archivedItems : batchResults).length > 0 && (archiveView ? archivedItems : batchResults).map((res, index) => (
+          {!queueView && !pricingView && (archiveView ? archivedItems : batchResults).length > 0 && (archiveView ? archivedItems : batchResults).map((res, index) => (
             <motion.div
               key={res.productTitle + index}
               initial={{ opacity: 0, y: 20 }}
@@ -1844,7 +1878,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Strategy Context Block */}
-        {!archiveView && (
+        {!archiveView && !pricingView && (
         <section className="mt-32 mb-16 max-w-5xl mx-auto">
           <div className="text-center mb-16 flex flex-col items-center">
             <span className="text-[9px] uppercase tracking-[0.4em] text-white/30 mb-8 block">Fundamental Economics</span>

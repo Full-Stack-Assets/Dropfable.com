@@ -14,6 +14,7 @@ const app = mod && mod.default ? mod.default : mod;
 const CHECKS = [
   ["GET", "/api/autonomous-status", null, [200]],
   ["GET", "/api/queue", null, [200]],
+  ["GET", "/api/billing/config", null, [200]],
   ["GET", "/api/trends", null, null],
   ["POST", "/api/manufacture", "{}", null],
   ["POST", "/api/image/generate", "{}", [400]],
