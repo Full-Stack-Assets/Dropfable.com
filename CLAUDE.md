@@ -111,7 +111,14 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   (the `ARCHIVE_KEY` constant in `src/constants.tsx` — the single source of truth;
   don't hardcode the literal). It also syncs with the server archive via `/api/archive`.
   Helpers handle save/remove/import/backup/version history — keep all reads/writes
-  going through that single key.
+  going through that single key. Saves **upsert by `productTitle`**.
+- Client-side export helpers live in `src/lib/export.ts` (TXT/HTML/PDF/CSV) and
+  `src/lib/salesKit.ts` (per-product Sales Kit ZIP — product file + listing copy +
+  cover + launch checklist — and the whole-archive ZIP). All download paths are
+  exercised by the Playwright UI smoke test (`scripts/ui-smoke.mjs`).
+- Niche autocomplete blends live `/api/trends` results (fetched once, cached in
+  state) with `PRESET_NICHES`; cover art from `/api/image/generate` is stored on
+  the item as `coverImage` (a base64 data URL) and embedded in PDF exports.
 
 ## Conventions
 

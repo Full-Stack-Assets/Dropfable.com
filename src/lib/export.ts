@@ -85,7 +85,18 @@ function renderProductPdf(doc: jsPDF, item: ManufactureResult, audience: string,
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(14);
-  doc.text(`Target Audience: ${audience}`, 105, 130 + titleLines.length * 10, { align: "center" });
+  const audienceY = 130 + titleLines.length * 10;
+  doc.text(`Target Audience: ${audience}`, 105, audienceY, { align: "center" });
+
+  // Cover art on the title page when one was generated (4:3 → 160x120mm).
+  // jsPDF throws on malformed image data; a bad cover shouldn't kill the export.
+  if (item.coverImage) {
+    try {
+      doc.addImage(item.coverImage, "PNG", 25, audienceY + 10, 160, 120);
+    } catch (e) {
+      console.error("PDF cover image skipped:", e);
+    }
+  }
   pdfFooter(doc, watermarkText);
 
   doc.addPage();

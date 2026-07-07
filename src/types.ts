@@ -21,4 +21,7 @@ export interface ManufactureResult {
   etsyTags: string[];
   gumroadBlurb: string;
   originalNiche?: string;
+  // base64 data URL from /api/image/generate; optional because older archive
+  // entries predate cover generation.
+  coverImage?: string;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -17,12 +17,16 @@ import {
   FileText,
   RefreshCw,
   Play,
-  CheckCircle2
+  CheckCircle2,
+  Image,
+  Package,
+  FolderArchive
 } from "lucide-react";
 
 import { PRODUCTS, PRESET_NICHES, LOADER_MESSAGES, ARCHIVE_KEY } from "./constants";
 import { parseJsonResponse } from "./lib/http";
 import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
+import { exportSalesKit, exportArchiveZip } from "./lib/salesKit";
 import { Header } from "./components/Header";
 import type { ProductType, ManufactureResult } from "./types";
 
@@ -58,6 +62,54 @@ export default function App() {
 
   const [autonomousStatus, setAutonomousStatus] = useState<any>(null);
   const [isTriggeringAutonomous, setIsTriggeringAutonomous] = useState(false);
+
+  // Cover art + bundle export state. Keyed by card index for per-card spinners.
+  const [isGeneratingCover, setIsGeneratingCover] = useState<Record<number, boolean>>({});
+  const [isZippingAll, setIsZippingAll] = useState(false);
+  // Live trending niches from /api/trends, fetched once and cached for the
+  // suggestion dropdown (replaces the old hardcoded mock list).
+  const [trendingNiches, setTrendingNiches] = useState<string[]>([]);
+
+  // Generate cover art via /api/image/generate and attach it to the item in
+  // whichever collection (results or archive) the card belongs to. Archived
+  // covers are persisted so Sales Kits and PDFs keep them across reloads.
+  const handleGenerateCover = async (item: ManufactureResult, index: number, isArchived: boolean) => {
+    setIsGeneratingCover(prev => ({ ...prev, [index]: true }));
+    try {
+      const res = await fetch("/api/image/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productTitle: item.productTitle, niche: item.originalNiche || niche }),
+      });
+      const data = await parseJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "Failed to generate cover art.");
+
+      const updatedItem = { ...item, coverImage: data.imageUrl };
+      if (isArchived) {
+        const updated = archivedItems.map((it, i) => (i === index ? updatedItem : it));
+        setArchivedItems(updated);
+        localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
+      } else {
+        setBatchResults(prev => prev.map((it, i) => (i === index ? updatedItem : it)));
+      }
+    } catch (e: any) {
+      alert("Cover Art Error: " + (e?.message || e));
+    } finally {
+      setIsGeneratingCover(prev => ({ ...prev, [index]: false }));
+    }
+  };
+
+  const handleDownloadAllZip = async () => {
+    if (archivedItems.length === 0) return;
+    setIsZippingAll(true);
+    try {
+      await exportArchiveZip(archivedItems);
+    } catch (e: any) {
+      alert("Could not build ZIP: " + (e?.message || e));
+    } finally {
+      setIsZippingAll(false);
+    }
+  };
 
   const fetchAutonomousStatus = async () => {
     try {
@@ -232,21 +284,23 @@ export default function App() {
   };
 
   const handleSaveToArchive = async (item: ManufactureResult) => {
-    const isAlreadySaved = archivedItems.some((cached) => cached.productTitle === item.productTitle);
-    if (!isAlreadySaved) {
-      const updated = [...archivedItems, item];
-      setArchivedItems(updated);
-      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
-      
-      try {
-        await fetch("/api/archive", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item })
-        });
-      } catch (err) {
-        console.error("Failed to save to server archive:", err);
-      }
+    // Upsert by title: regenerating a product with the same title replaces the
+    // archived copy (previously a silent no-op that kept the stale version).
+    const existingIdx = archivedItems.findIndex((cached) => cached.productTitle === item.productTitle);
+    const updated = existingIdx >= 0
+      ? archivedItems.map((cached, i) => (i === existingIdx ? item : cached))
+      : [...archivedItems, item];
+    setArchivedItems(updated);
+    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
+
+    try {
+      await fetch("/api/archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item })
+      });
+    } catch (err) {
+      console.error("Failed to save to server archive:", err);
     }
   };
 
@@ -299,42 +353,53 @@ export default function App() {
       return;
     }
 
-    const timeoutId = setTimeout(() => {
-      const mockTrending = [
-        "AI Content Creators",
-        "Digital Nomads",
-        "Notion Template Designers",
-        "SaaS Founders",
-        "Fitness Coaches",
-        "Real Estate Investors",
-        "No-Code Enthusiasts",
-        "Remote Work Managers",
-        "Indie Game Developers"
-      ];
-      const results = mockTrending.filter(t => t.toLowerCase().includes(niche.toLowerCase()) && t.toLowerCase() !== niche.toLowerCase());
-      setSuggestions(results);
+    const timeoutId = setTimeout(async () => {
+      // Suggestions come from live Gemini trends (fetched once, cached) blended
+      // with the preset niches; previously this filtered a hardcoded mock list
+      // while the real /api/trends endpoint sat unused.
+      let live = trendingNiches;
+      if (live.length === 0) {
+        try {
+          const res = await fetch("/api/trends");
+          const data = await parseJsonResponse(res);
+          if (res.ok && Array.isArray(data.trends) && data.trends.length > 0) {
+            live = data.trends;
+            setTrendingNiches(live);
+          }
+        } catch {
+          // offline / rate-limited: presets below still provide suggestions
+        }
+      }
+      const pool = [...new Set([...live, ...PRESET_NICHES])];
+      const q = niche.toLowerCase();
+      setSuggestions(pool.filter(t => t.toLowerCase().includes(q) && t.toLowerCase() !== q));
     }, 300);
     return () => clearTimeout(timeoutId);
-  }, [niche, isBatchMode, archiveView]);
+  }, [niche, isBatchMode, archiveView, trendingNiches]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        if (!archiveView && niche.trim() !== "" && !loading) {
-          e.preventDefault();
-          triggerSubmit();
-        }
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+  // Keyboard shortcuts. The handler reads fresh state through a ref so the
+  // window listener registers exactly once (the previous version re-registered
+  // on every render; naive deps would have risked stale closures instead).
+  const keydownRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keydownRef.current = (e: KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      if (!archiveView && niche.trim() !== "" && !loading) {
         e.preventDefault();
-        if (!archiveView && batchResults.length > 0) {
-          batchResults.forEach(res => handleSaveToArchive(res));
-        }
+        triggerSubmit();
       }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  });
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      if (!archiveView && batchResults.length > 0) {
+        batchResults.forEach(res => handleSaveToArchive(res));
+      }
+    }
+  };
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => keydownRef.current(e);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   const handleCopyText = (text: string, identifier: string) => {
     navigator.clipboard.writeText(text);
@@ -1139,6 +1204,13 @@ export default function App() {
               {archivedItems.length > 0 && (
                 <div className="flex flex-wrap items-center gap-3">
                   <button
+                    onClick={handleDownloadAllZip}
+                    disabled={isZippingAll}
+                    className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5 disabled:opacity-50"
+                  >
+                    <FolderArchive className="w-3 h-3" /> {isZippingAll ? "Bundling..." : `Download All (ZIP · ${archivedItems.length})`}
+                  </button>
+                  <button
                     onClick={handleDownloadMetadataCSV}
                     className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5"
                   >
@@ -1307,12 +1379,12 @@ export default function App() {
                       <ExternalLink className="w-3 h-3" /> Quick View
                     </button>
                   )}
-                  {!archiveView && !archivedItems.some(i => i.productTitle === res.productTitle) && (
+                  {!archiveView && (
                     <button
                       onClick={() => handleSaveToArchive(res)}
                       className="text-[9px] uppercase tracking-widest text-[#E0E0E0] hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5"
                     >
-                      <Save className="w-3 h-3" /> Save to Archive
+                      <Save className="w-3 h-3" /> {archivedItems.some(i => i.productTitle === res.productTitle) ? "Update Archive" : "Save to Archive"}
                     </button>
                   )}
                   {archiveView && (
@@ -1350,7 +1422,14 @@ export default function App() {
                         onClick={() => handleDownloadPDF(res)}
                         className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 cursor-pointer py-1"
                       >
-                        <FileText className="w-3 h-3" /> Export .PDF 
+                        <FileText className="w-3 h-3" /> Export .PDF
+                      </button>
+                      <button
+                        onClick={() => exportSalesKit(res)}
+                        className="text-[9px] uppercase tracking-widest text-emerald-300/70 hover:text-emerald-200 transition-colors flex items-center gap-2 cursor-pointer py-1"
+                        title="Ready-to-upload seller package: product file, listing copy, cover art, launch checklist"
+                      >
+                        <Package className="w-3 h-3" /> Sales Kit .ZIP
                       </button>
                     </div>
                   </div>
@@ -1406,6 +1485,29 @@ export default function App() {
                   
                   <div className="border-b border-white/10 pb-3">
                     <span className="text-[9px] uppercase tracking-[0.3em] text-white/40">Market Positioning</span>
+                  </div>
+
+                  {/* Cover Art (listing thumbnail) */}
+                  <div>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="text-[9px] uppercase tracking-widest text-white/50">Listing Cover Art</span>
+                      <button
+                        onClick={() => handleGenerateCover(res, index, archiveView)}
+                        disabled={!!isGeneratingCover[index]}
+                        className="text-[9px] uppercase tracking-widest text-[#E0E0E0] hover:text-white transition-colors disabled:opacity-50 flex items-center gap-2"
+                      >
+                        <Image className="w-3 h-3" /> {isGeneratingCover[index] ? "Generating..." : res.coverImage ? "Regenerate" : "Generate Cover"}
+                      </button>
+                    </div>
+                    {res.coverImage ? (
+                      <div className="border border-white/10 bg-[#0A0A0A] aspect-[4/3] w-full flex items-center justify-center overflow-hidden">
+                        <img src={res.coverImage} referrerPolicy="no-referrer" alt="Cover Art" className="w-full h-full object-cover" />
+                      </div>
+                    ) : (
+                      <div className="border border-white/5 border-dashed aspect-[4/3] w-full flex items-center justify-center text-white/20 text-[10px] uppercase tracking-widest bg-white/5">
+                        {isGeneratingCover[index] ? "Synthesizing pixels..." : "No cover generated"}
+                      </div>
+                    )}
                   </div>
 
                   {/* Title */}
