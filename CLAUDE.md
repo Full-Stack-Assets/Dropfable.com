@@ -92,6 +92,33 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   (`queue_store.json`). **The hourly timer and the auto-`git push` to `main` are
   OFF by default** (they previously clobbered the repo); opt in with
   `ENABLE_AUTONOMOUS=true` / `ENABLE_AUTONOMOUS_GIT_PUSH=true` (never on Vercel).
+- `GET /api/billing/config`, `POST /api/billing/signup`, `GET /api/billing/account`,
+  `POST /api/billing/checkout`, `POST /api/billing/portal`, `POST /api/billing/webhook`
+  — the SaaS layer (see below). All **inert unless `BILLING_ENABLED=true`**;
+  `/api/billing/config` is the only one always live (it reports `enabled:false`).
+
+### SaaS billing & API-key metering (`billing.ts` + `billing-routes.ts`)
+
+- **Off by default.** With `BILLING_ENABLED` unset the app is exactly the free
+  self-hosted tool — no keys, no quota, no Pricing tab, no Stripe. This is a
+  no-regression subsystem: turning it on is purely additive.
+- **`billing.ts`** is the pure, React-free core (plans, `Account`, `newApiKey`,
+  the pluggable `AccountStore`, and `meter()` — check-and-consume with a monthly
+  rollover). **`billing-routes.ts`** is the Express glue (route handlers, Stripe,
+  and the `requireQuota()` middleware applied to `/api/manufacture` and
+  `/api/image/generate`).
+- **Storage is pluggable.** In-memory for standalone dev; **Upstash Redis over its
+  REST API** when `UPSTASH_REDIS_REST_URL`/`_TOKEN` are set — **required on Vercel**,
+  where in-memory state doesn't survive between invocations.
+- **Stripe** is optional and lazy-loaded (only when `STRIPE_SECRET_KEY` is set);
+  signup + the free tier work without it. The **webhook needs the raw request
+  body**, so `registerBillingWebhook(app)` mounts it **before** the global
+  `express.json()` parser in `server.ts` — keep that ordering.
+- The frontend calls `/api/billing/*` via `src/lib/billingClient.ts` (stores the
+  key in `localStorage['dropkit_api_key']`, injects it as the `x-api-key` header on
+  metered calls) and renders the Pricing/Account panel in `src/components/Billing.tsx`.
+- Guarded by `scripts/billing-smoke.cjs` in CI (signup → quota enforcement → Stripe
+  fail-closed). When changing plans/quotas/env, keep that green.
 
 ### Product catalog
 
@@ -145,11 +172,17 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 Copy `.env.example` to `.env.local`. AI Studio injects several of these at runtime.
 
 - `GEMINI_API_KEY` — **required** for all Gemini calls.
-- `APP_URL` — host URL (self-referential links / callbacks).
+- `APP_URL` — host URL (self-referential links / callbacks; also Stripe return URLs).
 - `NOTION_API_KEY`, `NOTION_PARENT_PAGE_ID` — required only for Notion push.
 - `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_STORE_DOMAIN` — required only for Shopify push.
+- **Billing (all optional, off by default):** `BILLING_ENABLED` gates the whole
+  SaaS layer. `FREE_QUOTA`/`STARTER_QUOTA`/`PRO_QUOTA` set monthly limits.
+  `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STARTER`,
+  `STRIPE_PRICE_PRO` (+ optional `*_PRICE_LABEL`) enable paid checkout.
+  `UPSTASH_REDIS_REST_URL`/`_TOKEN` provide the persistent account store
+  (**required on Vercel**). See `.env.example` and the SaaS section above.
 
-All secrets are server-side only; the frontend talks to Gemini/Notion/Shopify
+All secrets are server-side only; the frontend talks to Gemini/Notion/Shopify/Stripe
 exclusively through the Express API routes. **Never expose API keys to the client.**
 `.env*` files are gitignored (except `.env.example`).
 

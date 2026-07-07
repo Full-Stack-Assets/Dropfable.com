@@ -47,6 +47,12 @@ jobs:
           VERCEL: '1'
         run: node scripts/smoke.cjs
 
+      - name: Smoke test billing + metering
+        # Boots the bundle with BILLING_ENABLED and asserts the SaaS flow: signup
+        # issues a key, the metered endpoint enforces the monthly quota, and the
+        # Stripe routes fail closed without a secret. Guards the metering wiring.
+        run: node scripts/billing-smoke.cjs
+
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 

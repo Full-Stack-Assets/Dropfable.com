@@ -7,21 +7,27 @@ import { NICHE_TREND_DATA } from "../constants";
 interface HeaderProps {
   archiveView: boolean;
   queueView: boolean;
+  pricingView?: boolean;
+  showPricing?: boolean;
   pendingCount: number;
   archiveCount: number;
   onManufacture: () => void;
   onQueue: () => void;
   onArchive: () => void;
+  onPricing?: () => void;
 }
 
 export function Header({
   archiveView,
   queueView,
+  pricingView,
+  showPricing,
   pendingCount,
   archiveCount,
   onManufacture,
   onQueue,
   onArchive,
+  onPricing,
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-50 bg-[#0A0A0A]/90 backdrop-blur-md border-b border-white/10 flex-shrink-0">
@@ -48,7 +54,7 @@ export function Header({
         <div className="flex gap-10 text-[9px] uppercase tracking-[0.3em] text-white/50">
           <span
             onClick={onManufacture}
-            className={`pb-1 cursor-pointer transition-colors ${!archiveView && !queueView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
+            className={`pb-1 cursor-pointer transition-colors ${!archiveView && !queueView && !pricingView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
           >
             Manufacture
           </span>
@@ -64,6 +70,14 @@ export function Header({
           >
             Archive ({archiveCount})
           </span>
+          {showPricing && (
+            <span
+              onClick={onPricing}
+              className={`pb-1 cursor-pointer transition-colors ${pricingView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
+            >
+              Pricing
+            </span>
+          )}
         </div>
         <div className="hidden sm:flex text-[9px] uppercase tracking-widest text-white/40 border border-white/10 px-4 py-2 items-center justify-center hover:bg-white/5 transition-colors">
           Mk I. System
