@@ -12,6 +12,7 @@ const app = mod && mod.default ? mod.default : mod;
 
 // [method, path, body, allowedStatuses|null]. null = any status except 404.
 const CHECKS = [
+  ["GET", "/api/health", null, [200]],
   ["GET", "/api/autonomous-status", null, [200]],
   ["GET", "/api/queue", null, [200]],
   ["GET", "/api/billing/config", null, [200]],

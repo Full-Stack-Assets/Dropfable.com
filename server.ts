@@ -5,6 +5,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Client as NotionClient } from "@notionhq/client";
 import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
 import { registerPublicApi } from "./api-v1";
+import { BILLING_ENABLED, storageIsEphemeral } from "./billing";
 
 dotenv.config();
 
@@ -17,9 +18,49 @@ registerBillingWebhook(app);
 
 app.use(express.json({ limit: "15mb" }));
 
+// Opt-in structured request logging (one JSON line per request) for observability
+// in production/aggregators. Off by default to keep dev output clean.
+if (process.env.LOG_REQUESTS === "true") {
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on("finish", () => {
+      console.log(
+        JSON.stringify({
+          t: new Date().toISOString(),
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          ms: Date.now() - start,
+        })
+      );
+    });
+    next();
+  });
+}
+
 // JSON billing routes (config/signup/account/checkout/portal). The config route
 // is always live; the rest are only registered when BILLING_ENABLED=true.
 registerBillingRoutes(app);
+
+// Health / readiness probe for deployment pipelines, uptime monitors, and load
+// balancers. Dependency-light and unauthenticated; never rate-limited.
+app.get("/api/health", (_req, res) => {
+  const now = Date.now();
+  res.json({
+    status: "ok",
+    billing: BILLING_ENABLED,
+    storageEphemeral: storageIsEphemeral(),
+    rateLimitBackend: RL_REDIS ? "redis" : "memory",
+    models: Object.fromEntries(
+      ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"].map((m) => [
+        m,
+        modelCooldowns[m] && modelCooldowns[m] > now ? "cooldown" : "ok",
+      ])
+    ),
+    uptimeSec: Math.round(process.uptime()),
+    version: process.env.VERCEL_GIT_COMMIT_SHA || "dev",
+  });
+});
 
 // Initialize the GoogleGenAI client on the server
 // API key is fetched from process.env.GEMINI_API_KEY, which is supplied by AI Studio
@@ -99,30 +140,72 @@ async function generateText(params: { contents: any; config?: any }) {
 }
 
 // Lightweight per-IP rate limit for the paid Gemini endpoints — defense against
-// runaway cost if the site is reachable publicly. In-memory, so it is per-instance
-// on serverless (not a global cap); back it with a shared store for a hard limit.
-// Tune via RATE_LIMIT_PER_MIN (default 20/min).
+// runaway cost if the site is reachable publicly. Tune via RATE_LIMIT_PER_MIN
+// (default 20/min).
+//
+// Two backends: an in-memory sliding window (per-instance — fine for a single
+// standalone server) and, for multi-instance/serverless deployments where a
+// per-instance cap isn't a real limit, a shared Upstash fixed-window counter
+// (opt in with RATE_LIMIT_REDIS=true + Upstash creds). The Redis path fails OPEN
+// on any error so a Redis blip can never take the whole site down.
 const RL_WINDOW_MS = 60_000;
 const RL_MAX = Number(process.env.RATE_LIMIT_PER_MIN || 20);
+const RL_REDIS =
+  process.env.RATE_LIMIT_REDIS === "true" &&
+  !!process.env.UPSTASH_REDIS_REST_URL &&
+  !!process.env.UPSTASH_REDIS_REST_TOKEN;
 const rlHits = new Map<string, number[]>();
-function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+
+function clientIp(req: express.Request): string {
   const fwd = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+  return (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+}
+
+// Shared fixed-window counter via Upstash's REST pipeline (INCR + EXPIRE in one
+// round-trip). Returns true if the request is within the limit; fails open.
+async function redisRateAllowed(ip: string): Promise<boolean> {
+  const url = process.env.UPSTASH_REDIS_REST_URL!;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN!;
+  const bucket = Math.floor(Date.now() / RL_WINDOW_MS);
+  const key = `rl:${ip}:${bucket}`;
+  try {
+    const res = await fetch(`${url}/pipeline`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify([["INCR", key], ["EXPIRE", key, "60"]]),
+    });
+    if (!res.ok) return true; // fail open
+    const data: any = await res.json();
+    const count = Array.isArray(data) ? Number(data[0]?.result ?? 0) : 0;
+    return count <= RL_MAX;
+  } catch {
+    return true; // fail open on Redis/network error
+  }
+}
+
+function inMemoryRateAllowed(ip: string): boolean {
   const now = Date.now();
   const hits = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
-  if (hits.length >= RL_MAX) {
-    return res.status(429).json({ error: "Too many requests — please wait a minute and try again." });
-  }
+  if (hits.length >= RL_MAX) return false;
   hits.push(now);
   rlHits.set(ip, hits);
-  // Evict IPs whose window has fully expired so the map can't grow unbounded on
-  // a long-running server.
+  // Evict IPs whose window has fully expired so the map can't grow unbounded.
   if (rlHits.size > 1000) {
     for (const [key, times] of rlHits) {
       if (times.every((t) => now - t >= RL_WINDOW_MS)) rlHits.delete(key);
     }
   }
-  next();
+  return true;
+}
+
+function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = clientIp(req);
+  const tooMany = () => res.status(429).json({ error: "Too many requests — please wait a minute and try again." });
+  if (RL_REDIS) {
+    redisRateAllowed(ip).then((ok) => (ok ? next() : tooMany())).catch(() => next());
+    return;
+  }
+  return inMemoryRateAllowed(ip) ? next() : tooMany();
 }
 
 // On Vercel the deployment filesystem is read-only except for the OS temp dir,

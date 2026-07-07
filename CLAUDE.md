@@ -39,11 +39,15 @@ npm run build      # vite build (frontend) + esbuild bundle server.ts -> dist/se
 npm run start      # production: node dist/server.cjs (serves static dist/)
 npm run preview    # vite preview
 npm run lint       # tsc --noEmit (type-check only)
+npm test           # tsx --test test/*.test.ts (unit tests for the billing core)
 npm run clean      # rm -rf dist server.js
 ```
 
-There is **no test suite** and **no ESLint config**. The only quality gate is
-`npm run lint` (TypeScript type-checking). Run it before committing changes.
+There is **no ESLint config**. Quality gates: `npm run lint` (TypeScript
+type-checking) and `npm test` (fast unit tests of the pure billing logic —
+`test/*.test.ts`, run via the built-in `node:test` runner through `tsx`, no extra
+deps). Both run before the build in CI; run them before committing. Broader
+behavior is covered by the smoke tests (`scripts/*smoke*`) — see the CI section.
 
 ## Architecture
 
@@ -79,6 +83,8 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 
 ### Backend API endpoints (all in `server.ts`)
 
+- `GET /api/health` — unauthenticated readiness probe (billing/storage/model status,
+  rate-limit backend, uptime, deployed commit). For uptime monitors / load balancers.
 - `POST /api/manufacture` — main generator. Body: `{ productId, niche, angle, language }`.
   Uses `specMap`/`labelsMap` + a JSON `responseSchema` to return the product plus
   sales copy. Tries Gemini models in order via `getOrderedModels` (a per-process
@@ -142,8 +148,24 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   metered calls) and renders the Pricing/Account panel in `src/components/Billing.tsx`.
 - Guarded by `scripts/billing-smoke.cjs` in CI (signup → free hard cap → credit-pack
   top-up + bonus-credit spend → two-sided referral → paid upgrade via a self-signed
-  webhook → metered overage → annual checkout path). When changing plans/quotas/env,
-  keep that green.
+  webhook → metered overage → annual checkout path) plus `test/billing.test.ts`
+  unit tests. When changing plans/quotas/env, keep both green.
+- **Public API reference:** `docs/API.md`.
+
+### Operations / scaling
+
+- **Rate limiting** (`RATE_LIMIT_PER_MIN`, default 20/min per IP) has two backends:
+  an in-memory sliding window (per-instance) and a **shared Upstash fixed-window**
+  counter for multi-instance/serverless (opt in with `RATE_LIMIT_REDIS=true` +
+  Upstash creds). The Redis path **fails open** so a Redis blip can't take the site
+  down.
+- **Request logging:** set `LOG_REQUESTS=true` for one JSON line per request
+  (method/path/status/ms) — off by default.
+- **Concurrency note:** `meter()` is check-and-consume via read-modify-write on the
+  account record. On a single standalone process this is effectively atomic; on
+  multiple serverless instances hitting the same Upstash key, concurrent requests
+  can slightly overshoot a quota. Acceptable for the current scale; the fix when it
+  matters is atomic Upstash counters (INCR) or an EVAL compare-and-set.
 
 ### Product catalog
 

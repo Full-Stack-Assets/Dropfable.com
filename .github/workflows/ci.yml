@@ -32,6 +32,11 @@ jobs:
       - name: Type-check (tsc --noEmit)
         run: npm run lint
 
+      - name: Unit tests (billing core)
+        # Fast, granular tests of the pure billing logic (meter order, rollover,
+        # referrals, credit packs) against the in-memory store — no build needed.
+        run: npm test
+
       - name: Build frontend + standalone server
         run: npm run build
 
