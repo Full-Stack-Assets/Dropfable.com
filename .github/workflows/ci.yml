@@ -49,8 +49,9 @@ jobs:
 
       - name: Smoke test billing + metering
         # Boots the bundle with BILLING_ENABLED and drives the SaaS flow offline:
-        # signup + free hard cap, a self-signed Stripe webhook upgrade, metered
-        # overage past quota, and the annual checkout path. Guards metering/overage.
+        # signup + free hard cap, credit-pack top-up and bonus-credit spend, a
+        # two-sided referral, a self-signed Stripe webhook upgrade, metered overage,
+        # and the annual checkout path. Guards metering/credits/referral wiring.
         run: node scripts/billing-smoke.cjs
 
       - name: Install Playwright Chromium

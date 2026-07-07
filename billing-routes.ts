@@ -9,9 +9,12 @@ import type { Express, Request, Response, NextFunction } from "express";
 import {
   BILLING_ENABLED,
   PLANS,
+  CREDIT_PACKS,
   getPlan,
+  getCreditPack,
   getStore,
   createAccount,
+  addBonusCredits,
   meter,
   publicAccount,
   storageIsEphemeral,
@@ -80,6 +83,9 @@ export function requireQuota() {
       // Fire-and-forget so metering latency doesn't slow the generation.
       void reportOverage(result.customerId);
     }
+    if (typeof result.bonusRemaining === "number") {
+      res.setHeader("X-DropKit-Bonus-Remaining", String(result.bonusRemaining));
+    }
     next();
   };
 }
@@ -127,6 +133,15 @@ async function handleStripeEvent(event: any): Promise<void> {
       const session = event.data.object;
       const apiKey = session.client_reference_id as string | undefined;
       if (!apiKey) return;
+
+      // One-time credit-pack purchase (mode: payment) — add non-expiring credits.
+      if (session.mode === "payment") {
+        const credits = Number(session.metadata?.credits || 0);
+        if (credits > 0) await addBonusCredits(apiKey, credits);
+        break;
+      }
+
+      // Subscription checkout — set the customer and activate the plan.
       const account = await store.getByKey(apiKey);
       if (!account) return;
       account.stripeCustomerId = (session.customer as string) || account.stripeCustomerId;
@@ -167,6 +182,7 @@ export function registerBillingRoutes(app: Express): void {
       enabled: BILLING_ENABLED,
       ephemeral: BILLING_ENABLED && storageIsEphemeral(),
       checkout: BILLING_ENABLED && !!process.env.STRIPE_SECRET_KEY,
+      referralBonus: Number(process.env.REFERRAL_BONUS || 0),
       plans: Object.values(PLANS).map((p) => ({
         id: p.id,
         name: p.name,
@@ -178,16 +194,24 @@ export function registerBillingRoutes(app: Express): void {
         overage: p.overage,
         overagePriceLabel: p.overagePriceLabel,
       })),
+      creditPacks: Object.values(CREDIT_PACKS).map((c) => ({
+        id: c.id,
+        name: c.name,
+        credits: c.credits,
+        priceLabel: c.priceLabel,
+        purchasable: !!c.priceId,
+      })),
     });
   });
 
   if (!BILLING_ENABLED) return;
 
-  // Create a free account + API key.
+  // Create a free account + API key. Accepts an optional referral code.
   app.post("/api/billing/signup", async (req: Request, res: Response) => {
     try {
       const email = typeof req.body?.email === "string" ? req.body.email.trim() : undefined;
-      const account = await createAccount(email || undefined);
+      const ref = typeof req.body?.ref === "string" ? req.body.ref.trim() : undefined;
+      const account = await createAccount(email || undefined, ref || undefined);
       res.json({
         account: publicAccount(account),
         warning: storageIsEphemeral()
@@ -234,12 +258,46 @@ export function registerBillingRoutes(app: Express): void {
         customer: account.stripeCustomerId || undefined,
         customer_email: account.stripeCustomerId ? undefined : account.email || undefined,
         metadata: { plan: planId, apiKey, interval },
+        allow_promotion_codes: true,
         success_url: `${base}/?billing=success`,
         cancel_url: `${base}/?billing=cancelled`,
       });
       res.json({ url: session.url });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Could not start checkout." });
+    }
+  });
+
+  // Buy a one-time credit pack (pay-as-you-go). Stripe Checkout in payment mode;
+  // the webhook credits the account when the payment completes.
+  app.post("/api/billing/topup", async (req: Request, res: Response) => {
+    const stripe = await getStripe();
+    if (!stripe) return res.status(503).json({ error: "Credit purchase is not configured (missing STRIPE_SECRET_KEY)." });
+    const apiKey = apiKeyFrom(req);
+    const packId = req.body?.pack as string | undefined;
+    if (!apiKey) return res.status(400).json({ error: "Missing API key." });
+    const pack = getCreditPack(packId);
+    if (!pack) return res.status(400).json({ error: "Unknown credit pack." });
+    if (!pack.priceId) return res.status(400).json({ error: `Credit pack "${pack.id}" has no price configured.` });
+    const account = await getStore().getByKey(apiKey);
+    if (!account) return res.status(404).json({ error: "Unknown API key." });
+
+    try {
+      const base = appUrl(req);
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        line_items: [{ price: pack.priceId, quantity: 1 }],
+        client_reference_id: apiKey,
+        customer: account.stripeCustomerId || undefined,
+        customer_email: account.stripeCustomerId ? undefined : account.email || undefined,
+        metadata: { apiKey, credits: String(pack.credits), pack: pack.id },
+        allow_promotion_codes: true,
+        success_url: `${base}/?billing=credits`,
+        cancel_url: `${base}/?billing=cancelled`,
+      });
+      res.json({ url: session.url });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Could not start credit purchase." });
     }
   });
 

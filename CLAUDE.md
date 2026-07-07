@@ -93,9 +93,10 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   OFF by default** (they previously clobbered the repo); opt in with
   `ENABLE_AUTONOMOUS=true` / `ENABLE_AUTONOMOUS_GIT_PUSH=true` (never on Vercel).
 - `GET /api/billing/config`, `POST /api/billing/signup`, `GET /api/billing/account`,
-  `POST /api/billing/checkout`, `POST /api/billing/portal`, `POST /api/billing/webhook`
-  — the SaaS layer (see below). All **inert unless `BILLING_ENABLED=true`**;
-  `/api/billing/config` is the only one always live (it reports `enabled:false`).
+  `POST /api/billing/checkout`, `POST /api/billing/topup`, `POST /api/billing/portal`,
+  `POST /api/billing/webhook` — the SaaS layer (see below). All **inert unless
+  `BILLING_ENABLED=true`**; `/api/billing/config` is the only one always live (it
+  reports `enabled:false`).
 - `GET /api/v1`, `GET /api/v1/products`, `GET /api/v1/account`, `POST /api/v1/generate`
   — the **public, versioned REST API** for third-party integrators (`api-v1.ts`).
   `/api/v1/generate` reuses `manufactureProduct` behind the same `rateLimit` +
@@ -114,10 +115,19 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   `/api/image/generate`, and `/api/v1/generate`).
 - **Tiered plans** (free/starter/pro), each with **monthly + annual** Stripe prices.
   Checkout takes an `interval` (`month`/`year`); the Pricing UI shows a toggle.
-- **Usage-based overage:** past the monthly quota, paid plans with an active Stripe
+  Stripe promotion codes are enabled on every Checkout session.
+- **`meter()` consumption order:** included monthly quota → non-expiring **bonus
+  credits** → **metered overage** → hard-cap (402).
+- **Usage-based overage:** past quota + credits, paid plans with an active Stripe
   subscription keep generating — each extra unit is flagged by `meter()` and
   reported to a **Stripe Billing Meter** (`STRIPE_OVERAGE_METER_EVENT`, best-effort,
-  fire-and-forget). The free tier hard-caps (402). `*_OVERAGE="false"` opts a plan out.
+  fire-and-forget). The free tier hard-caps. `*_OVERAGE="false"` opts a plan out.
+- **Pay-as-you-go credit packs** (`CREDIT_PACKS`): one-time Stripe payments
+  (`mode: payment`) that add non-expiring `bonusCredits` via `POST /api/billing/topup`
+  → the webhook credits the account. Spendable even on the free plan.
+- **Referral program:** every account has a `referralCode`; a signup with `?ref=CODE`
+  grants `REFERRAL_BONUS` credits to both referrer and referee (`SIGNUP_BONUS` credits
+  every new account). Codes are indexed in the store (`getByReferral`).
 - **Public API:** `api-v1.ts` exposes the metered generator as a stable `/api/v1/*`
   surface for third parties, sharing the generator/rate-limit/quota machinery.
 - **Storage is pluggable.** In-memory for standalone dev; **Upstash Redis over its
@@ -130,9 +140,10 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - The frontend calls `/api/billing/*` via `src/lib/billingClient.ts` (stores the
   key in `localStorage['dropkit_api_key']`, injects it as the `x-api-key` header on
   metered calls) and renders the Pricing/Account panel in `src/components/Billing.tsx`.
-- Guarded by `scripts/billing-smoke.cjs` in CI (signup → free hard cap → paid
-  upgrade via a self-signed webhook → metered overage → annual checkout path).
-  When changing plans/quotas/env, keep that green.
+- Guarded by `scripts/billing-smoke.cjs` in CI (signup → free hard cap → credit-pack
+  top-up + bonus-credit spend → two-sided referral → paid upgrade via a self-signed
+  webhook → metered overage → annual checkout path). When changing plans/quotas/env,
+  keep that green.
 
 ### Product catalog
 
@@ -195,7 +206,9 @@ Copy `.env.example` to `.env.local`. AI Studio injects several of these at runti
   `STRIPE_PRICE_PRO` (+ optional `*_PRICE_LABEL`) enable monthly checkout;
   `STRIPE_PRICE_STARTER_ANNUAL`/`STRIPE_PRICE_PRO_ANNUAL` add annual plans.
   `STRIPE_OVERAGE_METER_EVENT` + `*_OVERAGE`/`*_OVERAGE_LABEL` control usage-based
-  overage. `UPSTASH_REDIS_REST_URL`/`_TOKEN` provide the persistent account store
+  overage. `STRIPE_PRICE_CREDITS_*` + `CREDITS_*` configure pay-as-you-go credit
+  packs; `REFERRAL_BONUS`/`SIGNUP_BONUS` the referral/signup credits.
+  `UPSTASH_REDIS_REST_URL`/`_TOKEN` provide the persistent account store
   (**required on Vercel**). See `.env.example` and the SaaS section above.
 
 All secrets are server-side only; the frontend talks to Gemini/Notion/Shopify/Stripe

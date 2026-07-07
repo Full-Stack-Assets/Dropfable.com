@@ -3,14 +3,23 @@
 // the default self-hosted app never shows it. Presentational state is local;
 // all persistence goes through src/lib/billingClient.
 import { useState } from "react";
-import { KeyRound, Check, Loader2, ExternalLink, Copy, Terminal } from "lucide-react";
+import { KeyRound, Check, Loader2, ExternalLink, Copy, Terminal, Gift, Zap } from "lucide-react";
 import type { BillingConfig, AccountInfo, BillingInterval } from "../lib/billingClient";
-import { signup, startCheckout, openPortal, setApiKey } from "../lib/billingClient";
+import { signup, startCheckout, startTopup, openPortal, setApiKey } from "../lib/billingClient";
 
 interface BillingProps {
   config: BillingConfig;
   account: AccountInfo | null;
   onAccountChange: (account: AccountInfo | null) => void;
+}
+
+// Referral code arriving via ?ref= — captured so signup credits the referrer.
+function refFromUrl(): string | undefined {
+  try {
+    return new URLSearchParams(window.location.search).get("ref") || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function Billing({ config, account, onAccountChange }: BillingProps) {
@@ -19,21 +28,47 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [refCopied, setRefCopied] = useState(false);
   const [interval, setInterval] = useState<BillingInterval>("month");
   const anyAnnual = config.plans.some((p) => p.annualPurchasable);
+  const purchasablePacks = config.creditPacks.filter((p) => p.purchasable);
 
   const handleSignup = async () => {
     setError(null);
     setNotice(null);
     setBusy("signup");
     try {
-      const { account: acct, warning } = await signup(email.trim() || undefined);
+      const { account: acct, warning } = await signup(email.trim() || undefined, refFromUrl());
       onAccountChange(acct);
       if (warning) setNotice(warning);
     } catch (e: any) {
       setError(e?.message || "Sign up failed.");
     } finally {
       setBusy(null);
+    }
+  };
+
+  const handleTopup = async (packId: string) => {
+    setError(null);
+    setBusy("pack:" + packId);
+    try {
+      const url = await startTopup(packId);
+      window.location.href = url;
+    } catch (e: any) {
+      setError(e?.message || "Could not start credit purchase.");
+      setBusy(null);
+    }
+  };
+
+  const referralUrl = account?.referralCode ? `${window.location.origin}/?ref=${account.referralCode}` : "";
+  const copyReferral = async () => {
+    if (!referralUrl) return;
+    try {
+      await navigator.clipboard.writeText(referralUrl);
+      setRefCopied(true);
+      setTimeout(() => setRefCopied(false), 1500);
+    } catch {
+      /* clipboard blocked */
     }
   };
 
@@ -124,6 +159,9 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
             <span>Usage this month</span>
             <span>
               {account.used} / {account.limit}
+              {account.bonusCredits > 0 && (
+                <span className="text-emerald-300/80"> · +{account.bonusCredits} credits</span>
+              )}
             </span>
           </div>
           <div className="h-1.5 w-full bg-white/10 rounded overflow-hidden mb-3">
@@ -165,6 +203,30 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
               Sign out
             </button>
           </div>
+
+          {/* Referral — share your link, both sides earn credits */}
+          {account.referralCode && config.referralBonus > 0 && (
+            <div className="mt-6 pt-6 border-t border-white/10">
+              <div className="flex items-center gap-2 text-white/70 text-xs mb-2">
+                <Gift className="w-3.5 h-3.5 text-emerald-300/80" /> Refer &amp; earn
+              </div>
+              <p className="text-[11px] text-white/40 mb-3">
+                Share your link — you and each person who signs up both get{" "}
+                <span className="text-emerald-300/80">{config.referralBonus} free credits</span>.
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs text-white/60 bg-black/40 border border-white/10 rounded px-3 py-2 truncate">
+                  {referralUrl}
+                </code>
+                <button
+                  onClick={copyReferral}
+                  className="text-[9px] uppercase tracking-widest text-white/60 border border-white/10 px-3 py-2 rounded hover:bg-white/5 flex items-center gap-1"
+                >
+                  {refCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} {refCopied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="mb-12 border border-white/10 rounded-lg p-6 bg-white/[0.02]">
@@ -260,6 +322,35 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
           );
         })}
       </div>
+
+      {/* Pay-as-you-go credit packs — one-time top-ups, no subscription */}
+      {purchasablePacks.length > 0 && config.checkout && (
+        <div className="mt-8">
+          <div className="flex items-center justify-center gap-2 text-[9px] uppercase tracking-[0.3em] text-white/40 mb-5">
+            <Zap className="w-3 h-3" /> Or top up — pay as you go
+          </div>
+          <div className="grid sm:grid-cols-2 gap-5">
+            {purchasablePacks.map((pack) => (
+              <div key={pack.id} className="border border-white/10 rounded-lg p-6 bg-white/[0.02] flex items-center justify-between">
+                <div>
+                  <div className="text-white/90 text-sm mb-1">{pack.name}</div>
+                  <div className="text-xs text-white/40">
+                    {pack.credits.toLocaleString()} credits · {pack.priceLabel} · never expire
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleTopup(pack.id)}
+                  disabled={!account || busy === "pack:" + pack.id}
+                  title={!account ? "Create a key first" : undefined}
+                  className="bg-white text-black text-[9px] uppercase tracking-[0.3em] font-medium px-4 py-2 rounded hover:bg-white/90 disabled:opacity-40 flex items-center gap-2"
+                >
+                  {busy === "pack:" + pack.id && <Loader2 className="w-3 h-3 animate-spin" />} Buy
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Developer API — the metered generator as a public REST surface */}
       {account && (

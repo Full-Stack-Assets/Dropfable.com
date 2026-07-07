@@ -17,11 +17,21 @@ export interface BillingPlan {
   overagePriceLabel: string;
 }
 
+export interface CreditPack {
+  id: string;
+  name: string;
+  credits: number;
+  priceLabel: string;
+  purchasable: boolean;
+}
+
 export interface BillingConfig {
   enabled: boolean;
   ephemeral: boolean;
   checkout: boolean;
+  referralBonus: number;
   plans: BillingPlan[];
+  creditPacks: CreditPack[];
 }
 
 export interface AccountInfo {
@@ -34,6 +44,8 @@ export interface AccountInfo {
   overage: number;
   overageAllowed: boolean;
   overagePriceLabel: string;
+  bonusCredits: number;
+  referralCode: string;
 }
 
 export type BillingInterval = "month" | "year";
@@ -72,11 +84,11 @@ export async function fetchBillingConfig(): Promise<BillingConfig | null> {
   }
 }
 
-export async function signup(email?: string): Promise<{ account: AccountInfo; warning?: string }> {
+export async function signup(email?: string, ref?: string): Promise<{ account: AccountInfo; warning?: string }> {
   const res = await fetch("/api/billing/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, ref }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Sign up failed.");
@@ -106,6 +118,17 @@ export async function startCheckout(plan: string, interval: BillingInterval = "m
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Could not start checkout.");
+  return data.url as string;
+}
+
+export async function startTopup(pack: string): Promise<string> {
+  const res = await fetch("/api/billing/topup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ pack }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Could not start credit purchase.");
   return data.url as string;
 }
 
