@@ -13,37 +13,70 @@ export const BILLING_ENABLED = process.env.BILLING_ENABLED === "true";
 export interface Plan {
   id: string;
   name: string;
-  /** Stripe Price ID; null for the free tier (no checkout). */
+  /** Stripe Price ID for the monthly subscription; null for the free tier. */
   priceId: string | null;
+  /** Stripe Price ID for the annual subscription; null if not offered. */
+  annualPriceId: string | null;
   /** Generations allowed per calendar month. */
   monthlyQuota: number;
-  /** Display price, informational only. */
+  /** Display price for monthly billing, informational only. */
   priceLabel: string;
+  /** Display price for annual billing, informational only. */
+  annualPriceLabel: string;
+  /**
+   * Whether generations beyond monthlyQuota are allowed and billed as metered
+   * overage (requires an active Stripe subscription on the account). The free
+   * tier never overages — it hard-caps.
+   */
+  overage: boolean;
+  /** Display price per overage unit, informational only. */
+  overagePriceLabel: string;
 }
+
+// Overage defaults to on for paid plans, off for free. Toggle per plan via
+// STARTER_OVERAGE / PRO_OVERAGE = "false".
+const paidOverage = (envVar: string | undefined) => envVar !== "false";
 
 export const PLANS: Record<string, Plan> = {
   free: {
     id: "free",
     name: "Free",
     priceId: null,
+    annualPriceId: null,
     monthlyQuota: Number(process.env.FREE_QUOTA || 5),
     priceLabel: "$0",
+    annualPriceLabel: "$0",
+    overage: false,
+    overagePriceLabel: "—",
   },
   starter: {
     id: "starter",
     name: "Starter",
     priceId: process.env.STRIPE_PRICE_STARTER || null,
+    annualPriceId: process.env.STRIPE_PRICE_STARTER_ANNUAL || null,
     monthlyQuota: Number(process.env.STARTER_QUOTA || 100),
     priceLabel: process.env.STARTER_PRICE_LABEL || "$9/mo",
+    annualPriceLabel: process.env.STARTER_ANNUAL_PRICE_LABEL || "$90/yr",
+    overage: paidOverage(process.env.STARTER_OVERAGE),
+    overagePriceLabel: process.env.STARTER_OVERAGE_LABEL || "$0.10/ea",
   },
   pro: {
     id: "pro",
     name: "Pro",
     priceId: process.env.STRIPE_PRICE_PRO || null,
+    annualPriceId: process.env.STRIPE_PRICE_PRO_ANNUAL || null,
     monthlyQuota: Number(process.env.PRO_QUOTA || 1000),
     priceLabel: process.env.PRO_PRICE_LABEL || "$29/mo",
+    annualPriceLabel: process.env.PRO_ANNUAL_PRICE_LABEL || "$290/yr",
+    overage: paidOverage(process.env.PRO_OVERAGE),
+    overagePriceLabel: process.env.PRO_OVERAGE_LABEL || "$0.05/ea",
   },
 };
+
+// Resolve a Stripe Price ID for a plan + billing interval ("month" | "year").
+export function priceIdForInterval(plan: Plan, interval: string | undefined): string | null {
+  return interval === "year" ? plan.annualPriceId : plan.priceId;
+}
 
 export function getPlan(id: string | undefined): Plan {
   return (id && PLANS[id]) || PLANS.free;
@@ -54,7 +87,8 @@ export interface Account {
   email?: string;
   plan: string; // plan id
   stripeCustomerId?: string;
-  usage: number; // generations used in the current period
+  usage: number; // generations used in the current period (includes overage units)
+  overage: number; // generations beyond the plan quota this period (metered/billed)
   periodStart: string; // "YYYY-MM" bucket the usage counts against
   createdAt: string;
 }
@@ -142,6 +176,7 @@ export async function createAccount(email?: string): Promise<Account> {
     email,
     plan: "free",
     usage: 0,
+    overage: 0,
     periodStart: currentPeriod(),
     createdAt: new Date().toISOString(),
   };
@@ -155,10 +190,19 @@ export interface MeterResult {
   remaining?: number;
   limit?: number;
   plan?: string;
+  /** True when this unit was allowed beyond quota and should be billed as overage. */
+  overage?: boolean;
+  /** Total overage units consumed this period (present when overage is true). */
+  overageUsed?: number;
+  /** Stripe customer to bill the overage against (present when overage is true). */
+  customerId?: string;
 }
 
-// Check-and-consume one generation for an API key. Rolls the usage counter over
-// at the start of each calendar month.
+// Check-and-consume one generation for an API key. Rolls the usage/overage
+// counters over at the start of each calendar month. When usage reaches the plan
+// quota, paid plans with overage enabled AND an active Stripe customer are allowed
+// to continue (each extra unit flagged as overage for metered billing); everyone
+// else hard-caps with quota_exceeded.
 export async function meter(apiKey: string | undefined): Promise<MeterResult> {
   if (!apiKey) return { ok: false, reason: "invalid_key" };
   const store = getStore();
@@ -169,29 +213,48 @@ export async function meter(apiKey: string | undefined): Promise<MeterResult> {
   if (account.periodStart !== period) {
     account.periodStart = period;
     account.usage = 0;
+    account.overage = 0;
   }
 
   const plan = getPlan(account.plan);
   if (account.usage >= plan.monthlyQuota) {
-    return { ok: false, reason: "quota_exceeded", remaining: 0, limit: plan.monthlyQuota, plan: plan.id };
+    const canOverage = plan.overage && !!account.stripeCustomerId;
+    if (!canOverage) {
+      return { ok: false, reason: "quota_exceeded", remaining: 0, limit: plan.monthlyQuota, plan: plan.id };
+    }
+    account.usage += 1;
+    account.overage = (account.overage || 0) + 1;
+    await store.put(account);
+    return {
+      ok: true,
+      remaining: 0,
+      limit: plan.monthlyQuota,
+      plan: plan.id,
+      overage: true,
+      overageUsed: account.overage,
+      customerId: account.stripeCustomerId,
+    };
   }
 
   account.usage += 1;
   await store.put(account);
-  return { ok: true, remaining: plan.monthlyQuota - account.usage, limit: plan.monthlyQuota, plan: plan.id };
+  return { ok: true, remaining: plan.monthlyQuota - account.usage, limit: plan.monthlyQuota, plan: plan.id, overage: false };
 }
 
 export function publicAccount(account: Account) {
   const plan = getPlan(account.plan);
-  if (account.periodStart !== currentPeriod()) {
-    return { apiKey: account.apiKey, email: account.email, plan: plan.id, planName: plan.name, used: 0, limit: plan.monthlyQuota };
-  }
+  const rolledOver = account.periodStart !== currentPeriod();
+  const used = rolledOver ? 0 : account.usage;
+  const overage = rolledOver ? 0 : account.overage || 0;
   return {
     apiKey: account.apiKey,
     email: account.email,
     plan: plan.id,
     planName: plan.name,
-    used: account.usage,
+    used,
     limit: plan.monthlyQuota,
+    overage,
+    overageAllowed: plan.overage && !!account.stripeCustomerId,
+    overagePriceLabel: plan.overagePriceLabel,
   };
 }

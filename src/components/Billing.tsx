@@ -3,8 +3,8 @@
 // the default self-hosted app never shows it. Presentational state is local;
 // all persistence goes through src/lib/billingClient.
 import { useState } from "react";
-import { KeyRound, Check, Loader2, ExternalLink, Copy } from "lucide-react";
-import type { BillingConfig, AccountInfo } from "../lib/billingClient";
+import { KeyRound, Check, Loader2, ExternalLink, Copy, Terminal } from "lucide-react";
+import type { BillingConfig, AccountInfo, BillingInterval } from "../lib/billingClient";
 import { signup, startCheckout, openPortal, setApiKey } from "../lib/billingClient";
 
 interface BillingProps {
@@ -19,6 +19,8 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [interval, setInterval] = useState<BillingInterval>("month");
+  const anyAnnual = config.plans.some((p) => p.annualPurchasable);
 
   const handleSignup = async () => {
     setError(null);
@@ -39,7 +41,7 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
     setError(null);
     setBusy(planId);
     try {
-      const url = await startCheckout(planId);
+      const url = await startCheckout(planId, interval);
       window.location.href = url;
     } catch (e: any) {
       setError(e?.message || "Could not start checkout.");
@@ -124,12 +126,26 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
               {account.used} / {account.limit}
             </span>
           </div>
-          <div className="h-1.5 w-full bg-white/10 rounded overflow-hidden mb-5">
+          <div className="h-1.5 w-full bg-white/10 rounded overflow-hidden mb-3">
             <div
               className={`h-full ${usagePct >= 100 ? "bg-red-400" : "bg-white/60"}`}
               style={{ width: `${usagePct}%` }}
             />
           </div>
+
+          {account.overage > 0 ? (
+            <p className="text-[11px] text-amber-200/80 mb-5">
+              +{account.overage} overage {account.overage === 1 ? "unit" : "units"} this month
+              {account.overagePriceLabel && account.overagePriceLabel !== "—" ? ` (billed at ${account.overagePriceLabel})` : ""}.
+            </p>
+          ) : account.overageAllowed ? (
+            <p className="text-[11px] text-white/40 mb-5">
+              Over quota, generations continue as metered overage
+              {account.overagePriceLabel && account.overagePriceLabel !== "—" ? ` at ${account.overagePriceLabel}` : ""}.
+            </p>
+          ) : (
+            <p className="text-[11px] text-white/40 mb-5">Hard cap at quota — upgrade to keep generating past the limit.</p>
+          )}
 
           <div className="flex flex-wrap gap-3">
             {account.plan !== "free" && config.checkout && (
@@ -179,25 +195,51 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
         </div>
       )}
 
+      {/* Monthly / annual toggle */}
+      {anyAnnual && (
+        <div className="flex justify-center mb-8">
+          <div className="inline-flex border border-white/10 rounded-full p-1 text-[9px] uppercase tracking-[0.3em]">
+            <button
+              onClick={() => setInterval("month")}
+              className={`px-4 py-1.5 rounded-full transition-colors ${interval === "month" ? "bg-white text-black" : "text-white/50 hover:text-white/80"}`}
+            >
+              Monthly
+            </button>
+            <button
+              onClick={() => setInterval("year")}
+              className={`px-4 py-1.5 rounded-full transition-colors ${interval === "year" ? "bg-white text-black" : "text-white/50 hover:text-white/80"}`}
+            >
+              Annual
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Plan cards */}
       <div className="grid sm:grid-cols-3 gap-5">
         {config.plans.map((plan) => {
           const current = account?.plan === plan.id;
+          const annual = interval === "year";
+          const price = annual ? plan.annualPriceLabel : plan.priceLabel;
+          const buyable = annual ? plan.annualPurchasable : plan.purchasable;
           return (
             <div
               key={plan.id}
               className={`border rounded-lg p-6 flex flex-col ${current ? "border-white/40 bg-white/[0.04]" : "border-white/10 bg-white/[0.02]"}`}
             >
               <div className="text-[9px] uppercase tracking-[0.3em] text-white/40 mb-3">{plan.name}</div>
-              <div className="text-2xl font-light text-white/90 mb-1">{plan.priceLabel}</div>
-              <div className="text-xs text-white/40 mb-6">{plan.monthlyQuota.toLocaleString()} generations / mo</div>
+              <div className="text-2xl font-light text-white/90 mb-1">{price}</div>
+              <div className="text-xs text-white/40 mb-1">{plan.monthlyQuota.toLocaleString()} generations / mo</div>
+              <div className="text-[11px] text-white/30 mb-6">
+                {plan.overage ? `then ${plan.overagePriceLabel} overage` : "hard cap at quota"}
+              </div>
 
               <div className="mt-auto">
                 {current ? (
                   <div className="text-[9px] uppercase tracking-widest text-white/60 border border-white/10 px-4 py-2 rounded text-center flex items-center justify-center gap-2">
                     <Check className="w-3 h-3" /> Current
                   </div>
-                ) : plan.purchasable && config.checkout ? (
+                ) : buyable && config.checkout ? (
                   <button
                     onClick={() => handleCheckout(plan.id)}
                     disabled={!account || busy === plan.id}
@@ -208,7 +250,7 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
                   </button>
                 ) : plan.purchasable ? (
                   <div className="text-[9px] uppercase tracking-widest text-white/30 text-center py-2">
-                    Checkout offline
+                    {annual && !plan.annualPurchasable ? "No annual price" : "Checkout offline"}
                   </div>
                 ) : (
                   <div className="text-[9px] uppercase tracking-widest text-white/30 text-center py-2">Included</div>
@@ -218,6 +260,25 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
           );
         })}
       </div>
+
+      {/* Developer API — the metered generator as a public REST surface */}
+      {account && (
+        <div className="mt-12 border border-white/10 rounded-lg p-6 bg-white/[0.02]">
+          <div className="flex items-center gap-2 text-white/80 text-sm mb-2">
+            <Terminal className="w-4 h-4" /> Developer API
+          </div>
+          <p className="text-xs text-white/40 mb-4">
+            Generate products programmatically. Every call draws on your plan quota (and overage, if enabled). Explore{" "}
+            <code className="text-white/60">GET /api/v1</code> for the full surface.
+          </p>
+          <pre className="text-[11px] leading-relaxed text-white/60 bg-black/40 border border-white/10 rounded p-4 overflow-x-auto">
+{`curl -X POST ${window.location.origin}/api/v1/generate \\
+  -H "x-api-key: ${account.apiKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"product":"planner","niche":"busy parents"}'`}
+          </pre>
+        </div>
+      )}
     </section>
   );
 }

@@ -15,6 +15,7 @@ import {
   meter,
   publicAccount,
   storageIsEphemeral,
+  priceIdForInterval,
 } from "./billing";
 
 let stripeSingleton: any = null;
@@ -37,8 +38,27 @@ function apiKeyFrom(req: Request): string | undefined {
   return (fromHeader || req.body?.apiKey || req.query?.key) as string | undefined;
 }
 
+// Report one overage unit to Stripe's metered billing (best-effort; a failure
+// here must never block a generation the caller is entitled to). Requires
+// STRIPE_OVERAGE_METER_EVENT to name a configured Stripe billing meter.
+async function reportOverage(customerId: string | undefined): Promise<void> {
+  const eventName = process.env.STRIPE_OVERAGE_METER_EVENT;
+  if (!customerId || !eventName) return;
+  const stripe = await getStripe();
+  if (!stripe) return;
+  try {
+    await stripe.billing.meterEvents.create({
+      event_name: eventName,
+      payload: { stripe_customer_id: customerId, value: "1" },
+    });
+  } catch (err: any) {
+    console.warn("[billing] overage meter event failed:", err?.message);
+  }
+}
+
 // Per-request quota gate for the paid Gemini endpoints. A no-op when billing is
 // off; otherwise it check-and-consumes one unit of the caller's monthly quota.
+// Beyond quota, paid plans with overage enabled continue on metered billing.
 export function requireQuota() {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (!BILLING_ENABLED) return next();
@@ -48,12 +68,17 @@ export function requireQuota() {
       const error =
         result.reason === "invalid_key"
           ? "Missing or invalid API key. Create a free key on the Pricing page and send it as the x-api-key header."
-          : "Monthly quota reached. Upgrade your plan on the Pricing page to keep generating.";
+          : "Monthly quota reached. Upgrade your plan (or enable overage on a paid plan) to keep generating.";
       return res.status(code).json({ error, reason: result.reason, limit: result.limit, plan: result.plan });
     }
     if (typeof result.remaining === "number") {
       res.setHeader("X-DropKit-Quota-Remaining", String(result.remaining));
       res.setHeader("X-DropKit-Quota-Limit", String(result.limit ?? ""));
+    }
+    if (result.overage) {
+      res.setHeader("X-DropKit-Overage", String(result.overageUsed ?? 1));
+      // Fire-and-forget so metering latency doesn't slow the generation.
+      void reportOverage(result.customerId);
     }
     next();
   };
@@ -88,10 +113,10 @@ export function registerBillingWebhook(app: Express): void {
   });
 }
 
-// Map a Stripe Price ID back to one of our plan ids (falls back to free).
+// Map a Stripe Price ID (monthly or annual) back to one of our plan ids.
 function planIdForPrice(priceId: string | undefined): string {
   if (!priceId) return "free";
-  const match = Object.values(PLANS).find((p) => p.priceId && p.priceId === priceId);
+  const match = Object.values(PLANS).find((p) => p.priceId === priceId || p.annualPriceId === priceId);
   return match ? match.id : "free";
 }
 
@@ -146,8 +171,12 @@ export function registerBillingRoutes(app: Express): void {
         id: p.id,
         name: p.name,
         priceLabel: p.priceLabel,
+        annualPriceLabel: p.annualPriceLabel,
         monthlyQuota: p.monthlyQuota,
         purchasable: !!p.priceId,
+        annualPurchasable: !!p.annualPriceId,
+        overage: p.overage,
+        overagePriceLabel: p.overagePriceLabel,
       })),
     });
   });
@@ -185,10 +214,14 @@ export function registerBillingRoutes(app: Express): void {
     if (!stripe) return res.status(503).json({ error: "Checkout is not configured (missing STRIPE_SECRET_KEY)." });
     const apiKey = apiKeyFrom(req);
     const planId = req.body?.plan as string | undefined;
+    const interval = req.body?.interval === "year" ? "year" : "month";
     if (!apiKey) return res.status(400).json({ error: "Missing API key." });
     if (!planId || !PLANS[planId]) return res.status(400).json({ error: "Unknown plan." });
     const plan = getPlan(planId);
-    if (!plan.priceId) return res.status(400).json({ error: `Plan "${planId}" is not purchasable.` });
+    const priceId = priceIdForInterval(plan, interval);
+    if (!priceId) {
+      return res.status(400).json({ error: `Plan "${planId}" has no ${interval === "year" ? "annual" : "monthly"} price configured.` });
+    }
     const account = await getStore().getByKey(apiKey);
     if (!account) return res.status(404).json({ error: "Unknown API key." });
 
@@ -196,11 +229,11 @@ export function registerBillingRoutes(app: Express): void {
       const base = appUrl(req);
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
-        line_items: [{ price: plan.priceId, quantity: 1 }],
+        line_items: [{ price: priceId, quantity: 1 }],
         client_reference_id: apiKey,
         customer: account.stripeCustomerId || undefined,
         customer_email: account.stripeCustomerId ? undefined : account.email || undefined,
-        metadata: { plan: planId, apiKey },
+        metadata: { plan: planId, apiKey, interval },
         success_url: `${base}/?billing=success`,
         cancel_url: `${base}/?billing=cancelled`,
       });

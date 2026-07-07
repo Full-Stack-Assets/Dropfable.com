@@ -96,6 +96,11 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
   `POST /api/billing/checkout`, `POST /api/billing/portal`, `POST /api/billing/webhook`
   — the SaaS layer (see below). All **inert unless `BILLING_ENABLED=true`**;
   `/api/billing/config` is the only one always live (it reports `enabled:false`).
+- `GET /api/v1`, `GET /api/v1/products`, `GET /api/v1/account`, `POST /api/v1/generate`
+  — the **public, versioned REST API** for third-party integrators (`api-v1.ts`).
+  `/api/v1/generate` reuses `manufactureProduct` behind the same `rateLimit` +
+  `requireQuota` as the first-party routes, so external calls are metered/billed
+  identically. Auth is the `x-api-key` header (when billing is on).
 
 ### SaaS billing & API-key metering (`billing.ts` + `billing-routes.ts`)
 
@@ -105,8 +110,16 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - **`billing.ts`** is the pure, React-free core (plans, `Account`, `newApiKey`,
   the pluggable `AccountStore`, and `meter()` — check-and-consume with a monthly
   rollover). **`billing-routes.ts`** is the Express glue (route handlers, Stripe,
-  and the `requireQuota()` middleware applied to `/api/manufacture` and
-  `/api/image/generate`).
+  and the `requireQuota()` middleware applied to `/api/manufacture`,
+  `/api/image/generate`, and `/api/v1/generate`).
+- **Tiered plans** (free/starter/pro), each with **monthly + annual** Stripe prices.
+  Checkout takes an `interval` (`month`/`year`); the Pricing UI shows a toggle.
+- **Usage-based overage:** past the monthly quota, paid plans with an active Stripe
+  subscription keep generating — each extra unit is flagged by `meter()` and
+  reported to a **Stripe Billing Meter** (`STRIPE_OVERAGE_METER_EVENT`, best-effort,
+  fire-and-forget). The free tier hard-caps (402). `*_OVERAGE="false"` opts a plan out.
+- **Public API:** `api-v1.ts` exposes the metered generator as a stable `/api/v1/*`
+  surface for third parties, sharing the generator/rate-limit/quota machinery.
 - **Storage is pluggable.** In-memory for standalone dev; **Upstash Redis over its
   REST API** when `UPSTASH_REDIS_REST_URL`/`_TOKEN` are set — **required on Vercel**,
   where in-memory state doesn't survive between invocations.
@@ -117,8 +130,9 @@ There is **no test suite** and **no ESLint config**. The only quality gate is
 - The frontend calls `/api/billing/*` via `src/lib/billingClient.ts` (stores the
   key in `localStorage['dropkit_api_key']`, injects it as the `x-api-key` header on
   metered calls) and renders the Pricing/Account panel in `src/components/Billing.tsx`.
-- Guarded by `scripts/billing-smoke.cjs` in CI (signup → quota enforcement → Stripe
-  fail-closed). When changing plans/quotas/env, keep that green.
+- Guarded by `scripts/billing-smoke.cjs` in CI (signup → free hard cap → paid
+  upgrade via a self-signed webhook → metered overage → annual checkout path).
+  When changing plans/quotas/env, keep that green.
 
 ### Product catalog
 
@@ -178,8 +192,10 @@ Copy `.env.example` to `.env.local`. AI Studio injects several of these at runti
 - **Billing (all optional, off by default):** `BILLING_ENABLED` gates the whole
   SaaS layer. `FREE_QUOTA`/`STARTER_QUOTA`/`PRO_QUOTA` set monthly limits.
   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STARTER`,
-  `STRIPE_PRICE_PRO` (+ optional `*_PRICE_LABEL`) enable paid checkout.
-  `UPSTASH_REDIS_REST_URL`/`_TOKEN` provide the persistent account store
+  `STRIPE_PRICE_PRO` (+ optional `*_PRICE_LABEL`) enable monthly checkout;
+  `STRIPE_PRICE_STARTER_ANNUAL`/`STRIPE_PRICE_PRO_ANNUAL` add annual plans.
+  `STRIPE_OVERAGE_METER_EVENT` + `*_OVERAGE`/`*_OVERAGE_LABEL` control usage-based
+  overage. `UPSTASH_REDIS_REST_URL`/`_TOKEN` provide the persistent account store
   (**required on Vercel**). See `.env.example` and the SaaS section above.
 
 All secrets are server-side only; the frontend talks to Gemini/Notion/Shopify/Stripe

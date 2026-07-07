@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Client as NotionClient } from "@notionhq/client";
 import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
+import { registerPublicApi } from "./api-v1";
 
 dotenv.config();
 
@@ -633,10 +634,19 @@ app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
     return res.json(data);
   } catch (error: any) {
     console.error("Manufacturing Jammed Error:", error);
-    return res.status(500).json({ 
-      error: error.message || "The manufacturing factory engine suffered a temporary jam. Please click 'Drop it' again!" 
+    return res.status(500).json({
+      error: error.message || "The manufacturing factory engine suffered a temporary jam. Please click 'Drop it' again!"
     });
   }
+});
+
+// Public, versioned REST API for third-party integrators (/api/v1/*). Reuses the
+// same generator, rate limiter, and quota metering as the first-party routes.
+registerPublicApi(app, {
+  manufacture: manufactureProduct,
+  productLabels: labelsMap,
+  rateLimit,
+  requireQuota: requireQuota(),
 });
 
 // 2. Queue management endpoints

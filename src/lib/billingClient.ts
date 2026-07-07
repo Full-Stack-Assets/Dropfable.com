@@ -9,8 +9,12 @@ export interface BillingPlan {
   id: string;
   name: string;
   priceLabel: string;
+  annualPriceLabel: string;
   monthlyQuota: number;
   purchasable: boolean;
+  annualPurchasable: boolean;
+  overage: boolean;
+  overagePriceLabel: string;
 }
 
 export interface BillingConfig {
@@ -27,7 +31,12 @@ export interface AccountInfo {
   planName: string;
   used: number;
   limit: number;
+  overage: number;
+  overageAllowed: boolean;
+  overagePriceLabel: string;
 }
+
+export type BillingInterval = "month" | "year";
 
 export function getApiKey(): string | null {
   try {
@@ -89,11 +98,11 @@ export async function fetchAccount(): Promise<AccountInfo | null> {
   return data.account as AccountInfo;
 }
 
-export async function startCheckout(plan: string): Promise<string> {
+export async function startCheckout(plan: string, interval: BillingInterval = "month"): Promise<string> {
   const res = await fetch("/api/billing/checkout", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ plan }),
+    body: JSON.stringify({ plan, interval }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Could not start checkout.");
