@@ -3,7 +3,8 @@
 // the default self-hosted app never shows it. Presentational state is local;
 // all persistence goes through src/lib/billingClient.
 import { useState } from "react";
-import { KeyRound, Check, Loader2, ExternalLink, Copy, Terminal, Gift, Zap } from "lucide-react";
+import { KeyRound, Check, Loader2, ExternalLink, Copy, Terminal, Gift, Zap, TrendingUp } from "lucide-react";
+import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from "recharts";
 import type { BillingConfig, AccountInfo, BillingInterval } from "../lib/billingClient";
 import { signup, startCheckout, startTopup, openPortal, setApiKey } from "../lib/billingClient";
 
@@ -183,6 +184,30 @@ export function Billing({ config, account, onAccountChange }: BillingProps) {
             </p>
           ) : (
             <p className="text-[11px] text-white/40 mb-5">Hard cap at quota — upgrade to keep generating past the limit.</p>
+          )}
+
+          {/* 30-day usage sparkline */}
+          {account.history && account.history.some((d) => d.count > 0) && (
+            <div className="mb-5">
+              <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-widest text-white/40 mb-2">
+                <TrendingUp className="w-3 h-3" /> Last 30 days · {account.history.reduce((s, d) => s + d.count, 0)} generations
+              </div>
+              <div className="h-12 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={account.history} margin={{ top: 2, bottom: 2, left: 0, right: 0 }}>
+                    <YAxis domain={[0, "dataMax"]} hide />
+                    <Tooltip
+                      cursor={{ stroke: "rgba(255,255,255,0.15)" }}
+                      contentStyle={{ background: "#111", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, fontSize: 11 }}
+                      labelStyle={{ color: "#999" }}
+                      itemStyle={{ color: "#fff" }}
+                      formatter={(v: number) => [`${v} generations`, ""]}
+                    />
+                    <Line type="monotone" dataKey="count" stroke="#ffffff" strokeWidth={1.25} dot={false} strokeOpacity={0.7} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           )}
 
           <div className="flex flex-wrap gap-3">

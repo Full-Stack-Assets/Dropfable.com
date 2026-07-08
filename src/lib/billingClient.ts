@@ -46,6 +46,7 @@ export interface AccountInfo {
   overagePriceLabel: string;
   bonusCredits: number;
   referralCode: string;
+  history: Array<{ date: string; count: number }>;
 }
 
 export type BillingInterval = "month" | "year";

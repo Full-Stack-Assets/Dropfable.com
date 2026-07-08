@@ -26,9 +26,12 @@ const {
   getCreditPack,
   priceIdForInterval,
   publicAccount,
+  historySeries,
   getStore,
   PLANS,
 } = await import("../billing.ts");
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
 
 test("createAccount issues a free account with a referral code", async () => {
   const acct = await createAccount("a@example.com");
@@ -147,4 +150,35 @@ test("publicAccount exposes safe, complete fields", async () => {
   assert.equal(pub.limit, PLANS.free.monthlyQuota);
   assert.equal(typeof pub.bonusCredits, "number");
   assert.match(pub.referralCode, /^[0-9A-F]{10}$/);
+});
+
+test("meter records per-day usage history", async () => {
+  const { apiKey } = await createAccount();
+  await meter(apiKey);
+  await meter(apiKey);
+  const acct = (await getStore().getByKey(apiKey))!;
+  assert.equal(acct.history[todayISO()], 2, "two generations counted today");
+});
+
+test("history prunes entries older than the retention window", async () => {
+  const { apiKey } = await createAccount();
+  const store = getStore();
+  const acct = (await store.getByKey(apiKey))!;
+  acct.history["2000-01-01"] = 5; // ancient entry
+  await store.put(acct);
+
+  await meter(apiKey); // triggers a prune on write
+  const after = (await store.getByKey(apiKey))!;
+  assert.equal(after.history["2000-01-01"], undefined, "stale day dropped");
+  assert.equal(after.history[todayISO()], 1);
+});
+
+test("historySeries returns a continuous zero-filled 30-day window", () => {
+  const series = historySeries({ [todayISO()]: 3 });
+  assert.equal(series.length, 30);
+  assert.equal(series[29].date, todayISO(), "last entry is today");
+  assert.equal(series[29].count, 3);
+  assert.equal(series[0].count, 0, "older days zero-filled");
+  // dates strictly increasing
+  for (let i = 1; i < series.length; i++) assert.ok(series[i].date > series[i - 1].date);
 });

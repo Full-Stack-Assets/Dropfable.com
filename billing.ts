@@ -126,11 +126,31 @@ export interface Account {
   referralCode: string; // this account's code to share
   referredBy?: string; // apiKey of the referrer, if any
   periodStart: string; // "YYYY-MM" bucket the usage counts against
+  history: Record<string, number>; // "YYYY-MM-DD" -> generations that day (last 30 days)
   createdAt: string;
 }
 
 function currentPeriod(): string {
   return new Date().toISOString().slice(0, 7); // YYYY-MM
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+// Number of days of per-day usage history retained on each account.
+const HISTORY_DAYS = 30;
+
+// Record one generation against today's bucket and prune anything older than the
+// retention window. Date strings are ISO (YYYY-MM-DD) so lexical compare == chronological.
+function bumpHistory(account: Account): void {
+  const history = account.history || (account.history = {});
+  const day = today();
+  history[day] = (history[day] || 0) + 1;
+  const cutoff = new Date(Date.now() - HISTORY_DAYS * 86_400_000).toISOString().slice(0, 10);
+  for (const d of Object.keys(history)) {
+    if (d < cutoff) delete history[d];
+  }
 }
 
 export function newApiKey(): string {
@@ -256,6 +276,7 @@ export async function createAccount(email?: string, referredByCode?: string): Pr
     referralCode: newReferralCode(),
     referredBy,
     periodStart: currentPeriod(),
+    history: {},
     createdAt: new Date().toISOString(),
   };
   await store.put(account);
@@ -315,6 +336,7 @@ export async function meter(apiKey: string | undefined): Promise<MeterResult> {
   // 1. Included monthly quota.
   if (account.usage < plan.monthlyQuota) {
     account.usage += 1;
+    bumpHistory(account);
     await store.put(account);
     return {
       ok: true,
@@ -329,6 +351,7 @@ export async function meter(apiKey: string | undefined): Promise<MeterResult> {
   // 2. Bonus credits (pay-as-you-go / referral) — non-expiring.
   if (account.bonusCredits > 0) {
     account.bonusCredits -= 1;
+    bumpHistory(account);
     await store.put(account);
     return {
       ok: true,
@@ -347,6 +370,7 @@ export async function meter(apiKey: string | undefined): Promise<MeterResult> {
     return { ok: false, reason: "quota_exceeded", remaining: 0, limit: plan.monthlyQuota, plan: plan.id };
   }
   account.overage = (account.overage || 0) + 1;
+  bumpHistory(account);
   await store.put(account);
   return {
     ok: true,
@@ -377,5 +401,18 @@ export function publicAccount(account: Account) {
     overagePriceLabel: plan.overagePriceLabel,
     bonusCredits: account.bonusCredits || 0,
     referralCode: account.referralCode || "",
+    history: historySeries(account.history || {}),
   };
+}
+
+// A continuous, zero-filled last-30-days series (oldest → newest) built from the
+// sparse per-day history map, ready for a client-side sparkline.
+export function historySeries(history: Record<string, number>): Array<{ date: string; count: number }> {
+  const series: Array<{ date: string; count: number }> = [];
+  const now = Date.now();
+  for (let i = HISTORY_DAYS - 1; i >= 0; i--) {
+    const date = new Date(now - i * 86_400_000).toISOString().slice(0, 10);
+    series.push({ date, count: history[date] || 0 });
+  }
+  return series;
 }

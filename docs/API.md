@@ -48,7 +48,9 @@ Lists the generatable product types.
 ```
 
 ### `GET /api/v1/account`
-Your plan, quota, usage, overage, and bonus-credit balance. Requires `x-api-key`.
+Your plan, quota, usage, overage, bonus-credit balance, referral code, and a
+`history` array — a continuous 30-day daily usage series (`{ date, count }`, oldest
+→ newest) suitable for charting. Requires `x-api-key`.
 
 ### `POST /api/v1/generate`
 Generate a product. Metered.
