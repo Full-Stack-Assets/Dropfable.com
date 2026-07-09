@@ -1,37 +1,134 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { jsPDF } from "jspdf";
 import ReactMarkdown from "react-markdown";
-import {
-  Sparkles,
-  Download,
-  Copy,
-  Check,
-  AlertCircle,
-  Layers,
-  Coins,
-  Clock,
-  ArrowRight,
+import { LineChart, Line, ResponsiveContainer, YAxis } from "recharts";
+import { 
+  Sparkles, 
+  Download, 
+  Copy, 
+  Check, 
+  AlertCircle, 
+  Calendar, 
+  Brain, 
+  Mail, 
+  BookOpen, 
+  CheckSquare, 
+  Layers, 
+  Coins, 
+  Clock, 
+  ArrowRight, 
+  Volume2, 
+  Info,
   ExternalLink,
+  Plus,
   Save,
   Trash2,
   FileText,
   RefreshCw,
   Play,
   CheckCircle2,
-  Image,
-  Package,
-  FolderArchive
+  Mic,
+  MicOff,
+  Globe,
+  Search
 } from "lucide-react";
 
-import { PRODUCTS, PRESET_NICHES, LOADER_MESSAGES, ARCHIVE_KEY } from "./constants";
-import { parseJsonResponse } from "./lib/http";
-import { exportProductTxt, exportProductHtml, exportProductPdf, exportBatchPdf, exportMetadataCsv } from "./lib/export";
-import { exportSalesKit, exportArchiveZip } from "./lib/salesKit";
-import { Header } from "./components/Header";
-import { Billing } from "./components/Billing";
-import { fetchBillingConfig, fetchAccount, authHeaders } from "./lib/billingClient";
-import type { BillingConfig, AccountInfo } from "./lib/billingClient";
-import type { ProductType, ManufactureResult } from "./types";
+interface ProductType {
+  id: string;
+  ico: React.ReactNode;
+  name: string;
+  code: string;
+  spec: string;
+}
+
+const PRODUCTS: ProductType[] = [
+  {
+    id: "planner",
+    ico: <Calendar className="w-5 h-5" />,
+    name: "Planner / Workbook",
+    code: "30-day structure",
+    spec: "30 daily interactive entries, weekly reflection reviews & comprehensive introduction"
+  },
+  {
+    id: "prompts",
+    ico: <Brain className="w-5 h-5" />,
+    name: "Prompt Pack",
+    code: "50 copy-paste prompts",
+    spec: "50 high-value ready-to-use bracketed prompts across 5 key niche categories"
+  },
+  {
+    id: "templates",
+    ico: <Mail className="w-5 h-5" />,
+    name: "Template Pack",
+    code: "25 fill-in scripts",
+    spec: "25 customizable captions, templates or message logs with custom blanks and strategies"
+  },
+  {
+    id: "guide",
+    ico: <BookOpen className="w-5 h-5" />,
+    name: "Mini-Guide / Book",
+    code: "~3k word deep-dive",
+    spec: "A complete non-fiction playbook including 6-8 chapters loaded with specific guidance"
+  },
+  {
+    id: "checklist",
+    ico: <CheckSquare className="w-5 h-5" />,
+    name: "Checklist System",
+    code: "10-part checklist package",
+    spec: "A synchronized set of 10 related checklists with sequential tasks and trigger index"
+  },
+  {
+    id: "swipe",
+    ico: <Layers className="w-5 h-5" />,
+    name: "Swipe File",
+    code: "75 creative hooks",
+    spec: "75 highly converting lines, email headers or openers with sectioned applicability guidance"
+  }
+];
+
+const PRESET_NICHES = [
+  "ADHD College Students",
+  "New Real Estate Agents",
+  "Pet Shop Owners",
+  "Self-Taught Indie Hackers",
+  "Vegan Meal Prep Beginners"
+];
+
+interface ManufactureResult {
+  productTitle: string;
+  productContent: string;
+  etsyTitle: string;
+  priceRecommendationValue: string;
+  listingDescription: string;
+  etsyTags: string[];
+  gumroadBlurb: string;
+  originalNiche?: string;
+}
+
+const NICHE_TREND_DATA = [
+  { intensity: 20 },
+  { intensity: 24 },
+  { intensity: 30 },
+  { intensity: 28 },
+  { intensity: 45 },
+  { intensity: 60 },
+  { intensity: 58 },
+  { intensity: 80 },
+  { intensity: 85 },
+  { intensity: 100 }
+];
+
+const LOADER_MESSAGES = [
+  "Setting up architecture...",
+  "Initiating high-value synthesis...",
+  "Conceptualizing structual solutions...",
+  "Drafting tailored expert content...",
+  "Formatting precise layout boundaries...",
+  "Aligning semantic search models...",
+  "Calibrating optimal price vectors...",
+  "Preparing final delivery payload..."
+];
 
 export default function App() {
   const [selectedProduct, setSelectedProduct] = useState<ProductType>(PRODUCTS[0]);
@@ -66,57 +163,85 @@ export default function App() {
   const [autonomousStatus, setAutonomousStatus] = useState<any>(null);
   const [isTriggeringAutonomous, setIsTriggeringAutonomous] = useState(false);
 
-  // Cover art + bundle export state. Keyed by card index for per-card spinners.
-  const [isGeneratingCover, setIsGeneratingCover] = useState<Record<number, boolean>>({});
-  const [isZippingAll, setIsZippingAll] = useState(false);
+  // Voice Speech Transcription & Live Trends States
+  const [isListeningNiche, setIsListeningNiche] = useState(false);
+  const [isListeningAngle, setIsListeningAngle] = useState(false);
+  const [trendsSearchQuery, setTrendsSearchQuery] = useState("");
+  const [trendsResults, setTrendsResults] = useState<any[]>([]);
+  const [trendsLoading, setTrendsLoading] = useState(false);
+  const [trendsError, setTrendsError] = useState<string | null>(null);
 
-  // SaaS billing (inert unless the server reports BILLING_ENABLED). When enabled,
-  // a Pricing tab appears and the metered endpoints carry the caller's API key.
-  const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null);
-  const [billingAccount, setBillingAccount] = useState<AccountInfo | null>(null);
-  const [pricingView, setPricingView] = useState(false);
-  // Live trending niches from /api/trends, fetched once and cached for the
-  // suggestion dropdown (replaces the old hardcoded mock list).
-  const [trendingNiches, setTrendingNiches] = useState<string[]>([]);
-
-  // Generate cover art via /api/image/generate and attach it to the item in
-  // whichever collection (results or archive) the card belongs to. Archived
-  // covers are persisted so Sales Kits and PDFs keep them across reloads.
-  const handleGenerateCover = async (item: ManufactureResult, index: number, isArchived: boolean) => {
-    setIsGeneratingCover(prev => ({ ...prev, [index]: true }));
-    try {
-      const res = await fetch("/api/image/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ productTitle: item.productTitle, niche: item.originalNiche || niche }),
-      });
-      const data = await parseJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to generate cover art.");
-
-      const updatedItem = { ...item, coverImage: data.imageUrl };
-      if (isArchived) {
-        const updated = archivedItems.map((it, i) => (i === index ? updatedItem : it));
-        setArchivedItems(updated);
-        localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
-      } else {
-        setBatchResults(prev => prev.map((it, i) => (i === index ? updatedItem : it)));
-      }
-    } catch (e: any) {
-      alert("Cover Art Error: " + (e?.message || e));
-    } finally {
-      setIsGeneratingCover(prev => ({ ...prev, [index]: false }));
+  const startSpeechRecognition = (target: "niche" | "angle") => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Speech Recognition is not supported by your browser. Please try Google Chrome or Safari.");
+      return;
     }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = language === "English" ? "en-US" : 
+                       language === "Spanish" ? "es-ES" :
+                       language === "French" ? "fr-FR" :
+                       language === "German" ? "de-DE" :
+                       language === "Italian" ? "it-IT" :
+                       language === "Portuguese" ? "pt-PT" :
+                       language === "Dutch" ? "nl-NL" :
+                       language === "Japanese" ? "ja-JP" : "en-US";
+
+    if (target === "niche") {
+      setIsListeningNiche(true);
+    } else {
+      setIsListeningAngle(true);
+    }
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      if (target === "niche") {
+        setNiche(prev => {
+          if (isBatchMode) {
+            return prev ? `${prev}\n${transcript}` : transcript;
+          } else {
+            return prev ? `${prev} ${transcript}` : transcript;
+          }
+        });
+      } else {
+        setAngle(prev => prev ? `${prev} ${transcript}` : transcript);
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech Recognition Error:", event.error);
+    };
+
+    recognition.onend = () => {
+      if (target === "niche") {
+        setIsListeningNiche(false);
+      } else {
+        setIsListeningAngle(false);
+      }
+    };
+
+    recognition.start();
   };
 
-  const handleDownloadAllZip = async () => {
-    if (archivedItems.length === 0) return;
-    setIsZippingAll(true);
+  const handleSearchTrends = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setTrendsLoading(true);
+    setTrendsError(null);
     try {
-      await exportArchiveZip(archivedItems);
-    } catch (e: any) {
-      alert("Could not build ZIP: " + (e?.message || e));
+      const qParam = encodeURIComponent(trendsSearchQuery.trim() || "currently trending digital product niches 2026");
+      const res = await fetch(`/api/trending-niches?q=${qParam}`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to fetch live trends.");
+      }
+      setTrendsResults(data.trends || []);
+    } catch (err: any) {
+      setTrendsError(err.message || "An error occurred while fetching trends.");
     } finally {
-      setIsZippingAll(false);
+      setTrendsLoading(false);
     }
   };
 
@@ -224,7 +349,7 @@ export default function App() {
       const res = await fetch("/api/archive");
       if (res.ok) {
         const { archive: serverArchive } = await res.json();
-        const localSaved = localStorage.getItem(ARCHIVE_KEY);
+        const localSaved = localStorage.getItem('dropkit_archive');
         let localArchive: ManufactureResult[] = [];
         if (localSaved) {
           try { localArchive = JSON.parse(localSaved); } catch (e) {}
@@ -239,15 +364,15 @@ export default function App() {
         if (response.ok) {
           const { archive: mergedArchive } = await response.json();
           setArchivedItems(mergedArchive);
-          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(mergedArchive));
+          localStorage.setItem('dropkit_archive', JSON.stringify(mergedArchive));
         } else {
           setArchivedItems(serverArchive);
-          localStorage.setItem(ARCHIVE_KEY, JSON.stringify(serverArchive));
+          localStorage.setItem('dropkit_archive', JSON.stringify(serverArchive));
         }
       }
     } catch (err) {
       console.error("Failed to sync archive:", err);
-      const localSaved = localStorage.getItem(ARCHIVE_KEY);
+      const localSaved = localStorage.getItem('dropkit_archive');
       if (localSaved) {
         try { setArchivedItems(JSON.parse(localSaved)); } catch (e) {}
       }
@@ -258,17 +383,6 @@ export default function App() {
     fetchQueue();
     fetchAutonomousStatus();
     syncArchive();
-  }, []);
-
-  // Load billing config once; if enabled, resolve any stored API key to an account.
-  useEffect(() => {
-    (async () => {
-      const cfg = await fetchBillingConfig();
-      if (!cfg?.enabled) return;
-      setBillingConfig(cfg);
-      const acct = await fetchAccount();
-      if (acct) setBillingAccount(acct);
-    })();
   }, []);
 
   useEffect(() => {
@@ -304,23 +418,21 @@ export default function App() {
   };
 
   const handleSaveToArchive = async (item: ManufactureResult) => {
-    // Upsert by title: regenerating a product with the same title replaces the
-    // archived copy (previously a silent no-op that kept the stale version).
-    const existingIdx = archivedItems.findIndex((cached) => cached.productTitle === item.productTitle);
-    const updated = existingIdx >= 0
-      ? archivedItems.map((cached, i) => (i === existingIdx ? item : cached))
-      : [...archivedItems, item];
-    setArchivedItems(updated);
-    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
-
-    try {
-      await fetch("/api/archive", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ item })
-      });
-    } catch (err) {
-      console.error("Failed to save to server archive:", err);
+    const isAlreadySaved = archivedItems.some((cached) => cached.productTitle === item.productTitle);
+    if (!isAlreadySaved) {
+      const updated = [...archivedItems, item];
+      setArchivedItems(updated);
+      localStorage.setItem('dropkit_archive', JSON.stringify(updated));
+      
+      try {
+        await fetch("/api/archive", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item })
+        });
+      } catch (err) {
+        console.error("Failed to save to server archive:", err);
+      }
     }
   };
 
@@ -328,7 +440,7 @@ export default function App() {
     const item = archivedItems[index];
     const updated = archivedItems.filter((_, i) => i !== index);
     setArchivedItems(updated);
-    localStorage.setItem(ARCHIVE_KEY, JSON.stringify(updated));
+    localStorage.setItem('dropkit_archive', JSON.stringify(updated));
     setSelectedArchiveIndices(prev => prev.filter(i => i !== index).map(i => i > index ? i - 1 : i));
     
     if (item && item.productTitle) {
@@ -373,53 +485,42 @@ export default function App() {
       return;
     }
 
-    const timeoutId = setTimeout(async () => {
-      // Suggestions come from live Gemini trends (fetched once, cached) blended
-      // with the preset niches; previously this filtered a hardcoded mock list
-      // while the real /api/trends endpoint sat unused.
-      let live = trendingNiches;
-      if (live.length === 0) {
-        try {
-          const res = await fetch("/api/trends");
-          const data = await parseJsonResponse(res);
-          if (res.ok && Array.isArray(data.trends) && data.trends.length > 0) {
-            live = data.trends;
-            setTrendingNiches(live);
-          }
-        } catch {
-          // offline / rate-limited: presets below still provide suggestions
-        }
-      }
-      const pool = [...new Set([...live, ...PRESET_NICHES])];
-      const q = niche.toLowerCase();
-      setSuggestions(pool.filter(t => t.toLowerCase().includes(q) && t.toLowerCase() !== q));
+    const timeoutId = setTimeout(() => {
+      const mockTrending = [
+        "AI Content Creators",
+        "Digital Nomads",
+        "Notion Template Designers",
+        "SaaS Founders",
+        "Fitness Coaches",
+        "Real Estate Investors",
+        "No-Code Enthusiasts",
+        "Remote Work Managers",
+        "Indie Game Developers"
+      ];
+      const results = mockTrending.filter(t => t.toLowerCase().includes(niche.toLowerCase()) && t.toLowerCase() !== niche.toLowerCase());
+      setSuggestions(results);
     }, 300);
     return () => clearTimeout(timeoutId);
-  }, [niche, isBatchMode, archiveView, trendingNiches]);
+  }, [niche, isBatchMode, archiveView]);
 
-  // Keyboard shortcuts. The handler reads fresh state through a ref so the
-  // window listener registers exactly once (the previous version re-registered
-  // on every render; naive deps would have risked stale closures instead).
-  const keydownRef = useRef<(e: KeyboardEvent) => void>(() => {});
-  keydownRef.current = (e: KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      if (!archiveView && niche.trim() !== "" && !loading) {
-        e.preventDefault();
-        triggerSubmit();
-      }
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-      e.preventDefault();
-      if (!archiveView && batchResults.length > 0) {
-        batchResults.forEach(res => handleSaveToArchive(res));
-      }
-    }
-  };
   useEffect(() => {
-    const listener = (e: KeyboardEvent) => keydownRef.current(e);
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, []);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        if (!archiveView && niche.trim() !== "" && !loading) {
+          e.preventDefault();
+          triggerSubmit();
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        if (!archiveView && batchResults.length > 0) {
+          batchResults.forEach(res => handleSaveToArchive(res));
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
 
   const handleCopyText = (text: string, identifier: string) => {
     navigator.clipboard.writeText(text);
@@ -429,23 +530,196 @@ export default function App() {
     }, 2000);
   };
 
-  const handleDownloadProduct = (item: ManufactureResult) =>
-    exportProductTxt(item, { productTypeName: selectedProduct.name, niche, angle });
+  const handleDownloadProduct = (item: ManufactureResult) => {
+    const fileContent = `=== DIGITAL PRODUCT ===
+TITLE: ${item.productTitle}
+TYPE: ${selectedProduct.name}
+AUDIENCE: ${item.originalNiche || niche}
+${angle ? `ANGLE: ${angle}` : ""}
+========================
 
-  const handleDownloadHTML = (item: ManufactureResult) => exportProductHtml(item);
+${item.productContent}
 
-  const handleDownloadPDF = (item: ManufactureResult) =>
-    exportProductPdf(item, { watermarkText, niche });
+========================
+© Manufactured by DropKit Digital Factory.`;
+
+    const blob = new Blob([fileContent], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    
+    const safeTitle = item.productTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+    
+    link.download = `${safeTitle || "dropkit-product"}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadHTML = (item: ManufactureResult) => {
+    const safeTitle = item.productTitle.replace(/<[^>]*>?/gm, '') || "dropkit-product";
+    const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>\${safeTitle}</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f9fafb; color: #111827; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        h1 { font-size: 2.25rem; font-weight: 800; margin-bottom: 1rem; }
+        .niche { color: #6b7280; font-size: 1rem; margin-bottom: 2rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+        .content { background: white; padding: 2.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); white-space: pre-wrap; font-size: 1.125rem; }
+        .footer { margin-top: 3rem; text-align: center; color: #9ca3af; font-size: 0.875rem; }
+    </style>
+</head>
+<body>
+    <h1>\${safeTitle}</h1>
+    <div class="niche">Target Audience: \${item.originalNiche || "General"}</div>
+    <div class="content">\${item.productContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
+    <div class="footer">Manufactured by DropKit Digital Factory</div>
+</body>
+</html>`;
+
+    const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `\${safeTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadPDF = (item: ManufactureResult) => {
+    const doc = new jsPDF();
+    
+    const addFooter = () => {
+      doc.setFontSize(10);
+      doc.setTextColor(150);
+      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
+      doc.text(footerText, 105, 285, { align: "center" });
+      doc.setTextColor(0);
+      doc.setFontSize(11);
+    };
+
+    // Title Page
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(24);
+    
+    // Use splitTextToSize to handle very long titles
+    const titleLines = doc.splitTextToSize(item.productTitle, 180);
+    doc.text(titleLines, 105, 100, { align: "center" });
+    
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(14);
+    doc.text(`Target Audience: ${item.originalNiche || niche || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
+
+    addFooter();
+
+    // Content Pages
+    doc.addPage();
+    doc.setTextColor(0);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    addFooter();
+    
+    const textLines = doc.splitTextToSize(item.productContent, 180);
+    
+    let y = 20;
+    for (let i = 0; i < textLines.length; i++) {
+      if (y > 275) {
+        doc.addPage();
+        addFooter();
+        y = 20;
+      }
+      doc.text(textLines[i], 15, y);
+      y += 6;
+    }
+    
+    const safeTitle = item.productTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+
+    doc.save(`${safeTitle || "dropkit-product"}.pdf`);
+  };
 
   const handleDownloadMultiPDF = () => {
     if (selectedArchiveIndices.length === 0) return;
-    exportBatchPdf(selectedArchiveIndices.map((idx) => archivedItems[idx]), { watermarkText });
+    const doc = new jsPDF();
+    let isFirst = true;
+
+    const addFooter = () => {
+      doc.setFontSize(10);
+      doc.setTextColor(150);
+      const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
+      doc.text(footerText, 105, 285, { align: "center" });
+      doc.setTextColor(0);
+      doc.setFontSize(11);
+    };
+
+    selectedArchiveIndices.forEach((idx) => {
+      const item = archivedItems[idx];
+      if (!isFirst) doc.addPage();
+      isFirst = false;
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(24);
+      const titleLines = doc.splitTextToSize(item.productTitle, 180);
+      doc.text(titleLines, 105, 100, { align: "center" });
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(14);
+      doc.text(`Target Audience: ${item.originalNiche || item.productTitle || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
+
+      addFooter();
+
+      doc.addPage();
+      doc.setTextColor(0);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(11);
+      addFooter();
+
+      let y = 20;
+      const textLines = doc.splitTextToSize(item.productContent, 180);
+      for (let i = 0; i < textLines.length; i++) {
+        if (y > 275) {
+          doc.addPage();
+          addFooter();
+          y = 20;
+        }
+        doc.text(textLines[i], 15, y);
+        y += 6;
+      }
+    });
+
+    doc.save("dropkit-batch-archive.pdf");
     setSelectedArchiveIndices([]);
   };
 
   const handleDownloadMetadataCSV = () => {
     if (archivedItems.length === 0) return;
-    exportMetadataCsv(archivedItems);
+    const headers = ["Title", "Niche", "Price", "Gumroad Blurb"];
+    const rows = archivedItems.map(item => [
+      `"${item.productTitle.replace(/"/g, '""')}"`,
+      `"${item.originalNiche || ""}"`,
+      `"${item.priceRecommendationValue}"`,
+      `"${item.gumroadBlurb.replace(/"/g, '""')}"`
+    ]);
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.href = encodedUri;
+    link.download = "dropkit_metadata.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const triggerSubmit = async () => {
@@ -462,95 +736,39 @@ export default function App() {
     setLoading(true);
     setBatchResults([]);
 
-    const newResults: ManufactureResult[] = [];
-    const failures: string[] = [];
-    const productsToProcess = [selectedProduct];
-    let currentIdx = 0;
-    const totalSteps = nichesToProcess.length * productsToProcess.length;
-
-    // Generate one product, retrying once on a transient failure (e.g. a 504
-    // timeout on a large product). Throws only if both attempts fail.
-    // Retries network errors and transient HTTP statuses (408/429/5xx) only;
-    // 4xx validation errors fail fast (retrying just re-sends an expensive call).
-    const isTransientStatus = (s: number) => s >= 500 || s === 408 || s === 429;
-
-    const generateOne = async (productId: string, label: string, currentNiche: string) => {
-      let lastErr: any;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        let response: Response;
-        try {
-          response = await fetch("/api/manufacture", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...authHeaders() },
-            body: JSON.stringify({
-              productId,
-              niche: currentNiche,
-              angle: angle.trim() || undefined,
-              language: language !== "English" ? language : undefined,
-            }),
-          });
-        } catch (e: any) {
-          lastErr = e; // network error — transient, retry
-          continue;
-        }
-
-        let data: any = {};
-        let parseErr: any = null;
-        try {
-          data = await parseJsonResponse(response);
-        } catch (e: any) {
-          parseErr = e; // non-JSON body (e.g. a 504/timeout HTML page)
-        }
-
-        if (parseErr) {
-          lastErr = parseErr;
-          if (!isTransientStatus(response.status)) throw parseErr;
-          continue; // transient — retry
-        }
-        if (response.ok) return data;
-
-        const err = new Error(data.error || `Failed to process synthesis for: ${currentNiche} (${label})`);
-        if (!isTransientStatus(response.status)) throw err; // 4xx — fail fast
-        lastErr = err; // transient — retry
-      }
-      throw lastErr;
-    };
-
     try {
+      const newResults: ManufactureResult[] = [];
       for (let i = 0; i < nichesToProcess.length; i++) {
+        setBatchProgress({ current: i + 1, total: nichesToProcess.length });
         const currentNiche = nichesToProcess[i];
 
-        for (let j = 0; j < productsToProcess.length; j++) {
-          const currentProduct = productsToProcess[j];
-          currentIdx++;
-          setBatchProgress({ current: currentIdx, total: totalSteps });
+        const response = await fetch("/api/manufacture", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            productId: selectedProduct.id,
+            niche: currentNiche,
+            angle: angle.trim() || undefined,
+            language: language !== "English" ? language : undefined,
+          }),
+        });
 
-          try {
-            const data = await generateOne(currentProduct.id, currentProduct.name, currentNiche);
-            newResults.push({ ...data, originalNiche: currentNiche });
-            setBatchResults([...newResults]);
-          } catch (e) {
-            // Don't abort the whole run — record the failure and keep going so
-            // one slow/timed-out product doesn't lose the others.
-            failures.push(nichesToProcess.length > 1 ? `${currentProduct.name} (${currentNiche})` : currentProduct.name);
-          }
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || `Failed to process synthesis for: ${currentNiche}`);
         }
-      }
 
-      if (failures.length > 0) {
-        setError(
-          newResults.length === 0
-            ? `Synthesis failed${failures.length > 1 ? " for all items" : ""}. Large products can exceed the time limit — please try again.`
-            : `Generated ${newResults.length} of ${totalSteps}. Click "Drop it" again to retry: ${failures.join(", ")}.`
-        );
+        newResults.push({ ...data, originalNiche: currentNiche });
+        setBatchResults([...newResults]);
       }
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during synthesis.");
     } finally {
       setLoading(false);
       setBatchProgress(null);
-      // Refresh the metered usage counter so the Pricing tab stays accurate.
-      if (billingConfig?.enabled) fetchAccount().then(a => { if (a) setBillingAccount(a); });
     }
   };
 
@@ -562,33 +780,58 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0A0A0A] text-[#E0E0E0] font-sans flex flex-col selection:bg-white/10 selection:text-white">
       {/* Header Sticky Bar */}
-      <Header
-        archiveView={archiveView}
-        queueView={queueView}
-        pricingView={pricingView}
-        showPricing={!!billingConfig?.enabled}
-        pendingCount={queueTasks.filter(t => t.status === "pending" || t.status === "processing").length}
-        archiveCount={archivedItems.length}
-        onManufacture={() => { setArchiveView(false); setQueueView(false); setPricingView(false); }}
-        onQueue={() => { setArchiveView(false); setQueueView(true); setPricingView(false); }}
-        onArchive={() => { setArchiveView(true); setQueueView(false); setPricingView(false); }}
-        onPricing={() => { setArchiveView(false); setQueueView(false); setPricingView(true); fetchAccount().then(a => { if (a) setBillingAccount(a); }); }}
-      />
+      <header className="sticky top-0 z-50 bg-[#0A0A0A]/90 backdrop-blur-md border-b border-white/10 flex-shrink-0">
+        <div className="max-w-[1200px] mx-auto px-6 sm:px-10 py-6 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-0">
+          <div className="flex items-center gap-8">
+            <div className="text-[10px] sm:text-xs tracking-[0.4em] font-medium uppercase text-white/90 flex items-center gap-4">
+              <span>DropKit</span>
+              <span className="text-white/30 hidden sm:inline">/ The Factory</span>
+            </div>
+            {/* Trending Niche Intensity Sparkline */}
+            <div className="hidden lg:flex flex-col w-24 opacity-80 border-l border-white/10 pl-6 ml-2">
+              <span className="text-[8px] uppercase tracking-widest text-white/40 mb-1 flex items-center gap-1">Trend <Sparkles className="w-2 h-2"/></span>
+              <div className="h-4 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={NICHE_TREND_DATA}>
+                    <YAxis domain={['dataMin', 'dataMax']} hide />
+                    <Line type="monotone" dataKey="intensity" stroke="#ffffff" strokeWidth={1} dot={false} strokeOpacity={0.6} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+          
+          <div className="flex gap-10 text-[9px] uppercase tracking-[0.3em] text-white/50">
+            <span 
+              onClick={() => { setArchiveView(false); setQueueView(false); }}
+              className={`pb-1 cursor-pointer transition-colors ${!archiveView && !queueView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
+            >
+              Manufacture
+            </span>
+            <span 
+              onClick={() => { setArchiveView(false); setQueueView(true); }}
+              className={`pb-1 cursor-pointer transition-colors ${queueView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
+            >
+              Queue ({queueTasks.filter(t => t.status === 'pending' || t.status === 'processing').length})
+            </span>
+            <span 
+              onClick={() => { setArchiveView(true); setQueueView(false); }}
+              className={`pb-1 cursor-pointer transition-colors ${archiveView ? 'text-white border-b border-white/40' : 'hover:text-white'}`}
+            >
+              Archive ({archivedItems.length})
+            </span>
+          </div>
+          <div className="hidden sm:flex text-[9px] uppercase tracking-widest text-white/40 border border-white/10 px-4 py-2 items-center justify-center hover:bg-white/5 transition-colors">
+            Mk I. System
+          </div>
+        </div>
+      </header>
 
       {/* Main Container */}
       <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-16 sm:py-24">
-
-        {/* Pricing / Account (SaaS billing — only reachable when enabled) */}
-        {pricingView && billingConfig && (
-          <Billing
-            config={billingConfig}
-            account={billingAccount}
-            onAccountChange={setBillingAccount}
-          />
-        )}
-
+        
         {/* Pitch Hero */}
-        {!archiveView && !queueView && !pricingView && (
+        {!archiveView && !queueView && (
           <>
             <section className="flex flex-col items-center text-center max-w-3xl mx-auto mb-20 sm:mb-32">
               <div className="w-px h-16 bg-gradient-to-b from-transparent to-white/20 mb-8 pb-4"></div>
@@ -691,9 +934,25 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
                     {/* Niche Input */}
                     <div className="relative">
-                      <label htmlFor="niche" className="block text-[9px] uppercase tracking-[0.3em] text-white/40 mb-4 transition-colors focus-within:text-white/70">
-                        Primary Target Audience * {isBatchMode && <span className="text-white/30 lowercase tracking-normal ml-2">(one per line)</span>}
-                      </label>
+                      <div className="flex items-center justify-between mb-4">
+                        <label htmlFor="niche" className="block text-[9px] uppercase tracking-[0.3em] text-white/40 transition-colors focus-within:text-white/70">
+                          Primary Target Audience * {isBatchMode && <span className="text-white/30 lowercase tracking-normal ml-2">(one per line)</span>}
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => startSpeechRecognition("niche")}
+                          className={`flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-wider px-2 py-1 border transition-all rounded-sm cursor-pointer ${
+                            isListeningNiche 
+                              ? "border-red-500/50 bg-red-500/10 text-red-400 animate-pulse" 
+                              : "border-white/10 hover:border-white/30 text-white/40 hover:text-white"
+                          }`}
+                          title="Transcribe Voice Input"
+                        >
+                          {isListeningNiche ? <MicOff className="w-2.5 h-2.5" /> : <Mic className="w-2.5 h-2.5" />}
+                          <span>{isListeningNiche ? "Listening..." : "Voice Input"}</span>
+                        </button>
+                      </div>
+
                       {isBatchMode ? (
                         <textarea
                           id="niche"
@@ -758,9 +1017,25 @@ export default function App() {
 
                     {/* Angle Input */}
                     <div className="relative">
-                      <label htmlFor="angle" className="block text-[9px] uppercase tracking-[0.3em] text-white/40 mb-4 transition-colors focus-within:text-white/70">
-                        Creative Vector (Optional)
-                      </label>
+                      <div className="flex items-center justify-between mb-4">
+                        <label htmlFor="angle" className="block text-[9px] uppercase tracking-[0.3em] text-white/40 transition-colors focus-within:text-white/70">
+                          Creative Vector (Optional)
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => startSpeechRecognition("angle")}
+                          className={`flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-wider px-2 py-1 border transition-all rounded-sm cursor-pointer ${
+                            isListeningAngle 
+                              ? "border-red-500/50 bg-red-500/10 text-red-400 animate-pulse" 
+                              : "border-white/10 hover:border-white/30 text-white/40 hover:text-white"
+                          }`}
+                          title="Transcribe Voice Input"
+                        >
+                          {isListeningAngle ? <MicOff className="w-2.5 h-2.5" /> : <Mic className="w-2.5 h-2.5" />}
+                          <span>{isListeningAngle ? "Listening..." : "Voice Input"}</span>
+                        </button>
+                      </div>
+
                       <input
                         id="angle"
                         type="text"
@@ -772,6 +1047,113 @@ export default function App() {
                       <p className="mt-4 text-[10px] text-white/30 font-light tracking-wide">
                         Modulates voice, tone, and strategic positioning frameworks.
                       </p>
+                    </div>
+
+                    {/* Google Search Live Trend Radar */}
+                    <div className="border border-white/10 bg-[#0E0E0E] p-6 sm:p-8 relative overflow-hidden rounded-sm mt-8 col-span-1 md:col-span-2">
+                      <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none">
+                        <Globe className="w-24 h-24" />
+                      </div>
+                      
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                        <div>
+                          <h3 className="text-xs uppercase tracking-widest font-mono text-white/90 flex items-center gap-2">
+                            <Globe className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Google Search Live Trend Radar</span>
+                          </h3>
+                          <p className="text-[10px] text-white/40 mt-1 font-light">
+                            Search for real-time trending niches using Google Search grounding.
+                          </p>
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          <span className="text-[8px] font-mono uppercase tracking-widest text-emerald-400 px-2 py-0.5 border border-emerald-500/20 bg-emerald-500/5">
+                            Search Grounding Enabled
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3 mb-6">
+                        <div className="relative flex-1">
+                          <input
+                            type="text"
+                            className="w-full bg-[#0A0A0A] border border-white/10 focus:border-white/40 px-4 py-2.5 text-xs text-white/90 placeholder:text-white/30 focus:outline-none transition-colors"
+                            placeholder="Query, e.g. 'hot digital products for creators', 'ai templates demand', 'micro saas niches'..."
+                            value={trendsSearchQuery}
+                            onChange={(e) => setTrendsSearchQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleSearchTrends();
+                              }
+                            }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleSearchTrends()}
+                          disabled={trendsLoading}
+                          className="px-5 py-2.5 bg-white text-black hover:bg-white/90 disabled:opacity-50 transition-colors text-[10px] font-mono uppercase tracking-wider flex items-center gap-2 cursor-pointer"
+                        >
+                          {trendsLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                          <span>{trendsLoading ? "Scanning..." : "Scan Trends"}</span>
+                        </button>
+                      </div>
+
+                      {trendsError && (
+                        <div className="text-xs text-red-400/90 font-mono bg-red-500/5 border border-red-500/20 p-4 mb-6">
+                          {trendsError}
+                        </div>
+                      )}
+
+                      {trendsResults.length > 0 ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                          {trendsResults.map((item, idx) => (
+                            <div key={idx} className="border border-white/5 bg-[#0A0A0A] p-4 flex flex-col justify-between hover:border-white/20 transition-all group">
+                              <div>
+                                <div className="flex items-start justify-between gap-2 mb-2">
+                                  <h4 className="text-xs font-medium text-white group-hover:text-emerald-400 transition-colors leading-tight">
+                                    {item.niche}
+                                  </h4>
+                                  <span className="text-[8px] font-mono text-white/30">#{idx + 1}</span>
+                                </div>
+                                <p className="text-[10px] text-white/50 leading-relaxed font-light mb-3">
+                                  {item.whyTrending}
+                                </p>
+                                <div className="border-t border-white/5 pt-2.5 mt-2">
+                                  <span className="text-[8px] uppercase tracking-widest text-emerald-400/60 block font-mono mb-1">Concept:</span>
+                                  <span className="text-[9px] text-white/70 italic font-serif leading-tight block">
+                                    {item.exampleConcept}
+                                  </span>
+                                </div>
+                              </div>
+                              
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isBatchMode) {
+                                    setNiche(prev => prev ? `${prev}\n${item.niche}` : item.niche);
+                                  } else {
+                                    setNiche(item.niche);
+                                  }
+                                  if (item.exampleConcept) {
+                                    setAngle(item.exampleConcept);
+                                  }
+                                }}
+                                className="w-full text-center mt-4 py-1.5 bg-white/5 hover:bg-white hover:text-black border border-white/10 hover:border-transparent text-[8px] uppercase tracking-widest font-mono text-white/60 transition-all cursor-pointer"
+                              >
+                                + Deploy Niche
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        !trendsLoading && (
+                          <div className="text-center py-6 border border-dashed border-white/5 bg-[#0A0A0A]/50 text-white/30 text-[10px] uppercase tracking-widest font-mono">
+                            Scan the radar to discover high-intensity Google Search trends
+                          </div>
+                        )
+                      )}
                     </div>
 
                     {/* Language Dropdown */}
@@ -944,6 +1326,17 @@ export default function App() {
 
             {/* Autonomous Scheduled Batch Dashboard */}
             <div className="border border-white/10 bg-[#0E0E0E] p-6 mb-10 relative overflow-hidden">
+              {autonomousStatus?.hasApiKey === false && (
+                <div className="mb-6 border border-amber-500/30 bg-amber-500/5 p-4 flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="text-xs font-semibold text-amber-400 tracking-wider uppercase font-mono">GEMINI_API_KEY Missing</h4>
+                    <p className="text-[11px] text-white/70 leading-relaxed mt-1">
+                      No API Key was detected in your Secrets. Please click the <strong>Settings &gt; Secrets</strong> menu at the top of the workspace editor to add your <strong>GEMINI_API_KEY</strong>, then restart the application.
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="absolute top-0 right-0 p-4">
                 <span className="text-[9px] px-2.5 py-1 border border-emerald-500/30 bg-emerald-500/5 text-emerald-400 uppercase tracking-widest font-mono rounded-sm flex items-center gap-1.5">
                   <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${autonomousStatus?.isRunning ? 'animate-ping' : 'animate-pulse'}`} />
@@ -1238,13 +1631,6 @@ export default function App() {
               {archivedItems.length > 0 && (
                 <div className="flex flex-wrap items-center gap-3">
                   <button
-                    onClick={handleDownloadAllZip}
-                    disabled={isZippingAll}
-                    className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5 disabled:opacity-50"
-                  >
-                    <FolderArchive className="w-3 h-3" /> {isZippingAll ? "Bundling..." : `Download All (ZIP · ${archivedItems.length})`}
-                  </button>
-                  <button
                     onClick={handleDownloadMetadataCSV}
                     className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5"
                   >
@@ -1367,7 +1753,7 @@ export default function App() {
 
         {/* Payload Display Layer */}
         <AnimatePresence>
-          {!queueView && !pricingView && (archiveView ? archivedItems : batchResults).length > 0 && (archiveView ? archivedItems : batchResults).map((res, index) => (
+          {!queueView && (archiveView ? archivedItems : batchResults).length > 0 && (archiveView ? archivedItems : batchResults).map((res, index) => (
             <motion.div
               key={res.productTitle + index}
               initial={{ opacity: 0, y: 20 }}
@@ -1413,12 +1799,12 @@ export default function App() {
                       <ExternalLink className="w-3 h-3" /> Quick View
                     </button>
                   )}
-                  {!archiveView && (
+                  {!archiveView && !archivedItems.some(i => i.productTitle === res.productTitle) && (
                     <button
                       onClick={() => handleSaveToArchive(res)}
                       className="text-[9px] uppercase tracking-widest text-[#E0E0E0] hover:text-white transition-colors flex items-center gap-2 border border-white/10 px-4 py-2 hover:bg-white/5"
                     >
-                      <Save className="w-3 h-3" /> {archivedItems.some(i => i.productTitle === res.productTitle) ? "Update Archive" : "Save to Archive"}
+                      <Save className="w-3 h-3" /> Save to Archive
                     </button>
                   )}
                   {archiveView && (
@@ -1456,14 +1842,7 @@ export default function App() {
                         onClick={() => handleDownloadPDF(res)}
                         className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white transition-colors flex items-center gap-2 cursor-pointer py-1"
                       >
-                        <FileText className="w-3 h-3" /> Export .PDF
-                      </button>
-                      <button
-                        onClick={() => exportSalesKit(res)}
-                        className="text-[9px] uppercase tracking-widest text-emerald-300/70 hover:text-emerald-200 transition-colors flex items-center gap-2 cursor-pointer py-1"
-                        title="Ready-to-upload seller package: product file, listing copy, cover art, launch checklist"
-                      >
-                        <Package className="w-3 h-3" /> Sales Kit .ZIP
+                        <FileText className="w-3 h-3" /> Export .PDF 
                       </button>
                     </div>
                   </div>
@@ -1519,29 +1898,6 @@ export default function App() {
                   
                   <div className="border-b border-white/10 pb-3">
                     <span className="text-[9px] uppercase tracking-[0.3em] text-white/40">Market Positioning</span>
-                  </div>
-
-                  {/* Cover Art (listing thumbnail) */}
-                  <div>
-                    <div className="flex justify-between items-center mb-4">
-                      <span className="text-[9px] uppercase tracking-widest text-white/50">Listing Cover Art</span>
-                      <button
-                        onClick={() => handleGenerateCover(res, index, archiveView)}
-                        disabled={!!isGeneratingCover[index]}
-                        className="text-[9px] uppercase tracking-widest text-[#E0E0E0] hover:text-white transition-colors disabled:opacity-50 flex items-center gap-2"
-                      >
-                        <Image className="w-3 h-3" /> {isGeneratingCover[index] ? "Generating..." : res.coverImage ? "Regenerate" : "Generate Cover"}
-                      </button>
-                    </div>
-                    {res.coverImage ? (
-                      <div className="border border-white/10 bg-[#0A0A0A] aspect-[4/3] w-full flex items-center justify-center overflow-hidden">
-                        <img src={res.coverImage} referrerPolicy="no-referrer" alt="Cover Art" className="w-full h-full object-cover" />
-                      </div>
-                    ) : (
-                      <div className="border border-white/5 border-dashed aspect-[4/3] w-full flex items-center justify-center text-white/20 text-[10px] uppercase tracking-widest bg-white/5">
-                        {isGeneratingCover[index] ? "Synthesizing pixels..." : "No cover generated"}
-                      </div>
-                    )}
                   </div>
 
                   {/* Title */}
@@ -1878,7 +2234,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Strategy Context Block */}
-        {!archiveView && !pricingView && (
+        {!archiveView && (
         <section className="mt-32 mb-16 max-w-5xl mx-auto">
           <div className="text-center mb-16 flex flex-col items-center">
             <span className="text-[9px] uppercase tracking-[0.4em] text-white/30 mb-8 block">Fundamental Economics</span>

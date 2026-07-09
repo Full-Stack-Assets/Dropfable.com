@@ -2,23 +2,14 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
-import { Client as NotionClient } from "@notionhq/client";
-import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
+import { createServer as createViteServer } from "vite";
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
-// The Stripe webhook needs the raw request body to verify signatures, so it must
-// be registered before the JSON body parser. No-op unless billing is enabled.
-registerBillingWebhook(app);
-
 app.use(express.json({ limit: "15mb" }));
-
-// JSON billing routes (config/signup/account/checkout/portal). The config route
-// is always live; the rest are only registered when BILLING_ENABLED=true.
-registerBillingRoutes(app);
 
 // Initialize the GoogleGenAI client on the server
 // API key is fetched from process.env.GEMINI_API_KEY, which is supplied by AI Studio
@@ -52,7 +43,6 @@ const labelsMap: Record<string, string> = {
 };
 
 import fs from "fs";
-import os from "os";
 import { execSync } from "child_process";
 
 // Model health tracking to dynamically deprioritize overloaded/503/429 models temporarily
@@ -67,69 +57,10 @@ function getOrderedModels(preferredModels: string[]): string[] {
 
 function markModelFailure(modelName: string, minutes = 5) {
   modelCooldowns[modelName] = Date.now() + minutes * 60 * 1000;
-  console.warn(`[ModelTracker] Demoting ${modelName} for ${minutes} minutes due to a transient/overload error.`);
+  console.log(`[ModelTracker] Demoting ${modelName} for ${minutes} minutes due to a transient/overload occurrence.`);
 }
 
-// Generate text with model fallback, leading with the models actually provisioned
-// for this key (fastest first) and demoting any that return transient/overload
-// errors. Used by the lightweight text endpoints (e.g. /api/trends).
-async function generateText(params: { contents: any; config?: any }) {
-  const models = getOrderedModels([
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
-  ]);
-  let lastErr: any;
-  for (const model of models) {
-    try {
-      return await ai.models.generateContent({ model, ...params });
-    } catch (err: any) {
-      lastErr = err;
-      const msg = String(err?.message ?? err);
-      if (/\b(429|500|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg)) {
-        markModelFailure(model);
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
-
-// Lightweight per-IP rate limit for the paid Gemini endpoints — defense against
-// runaway cost if the site is reachable publicly. In-memory, so it is per-instance
-// on serverless (not a global cap); back it with a shared store for a hard limit.
-// Tune via RATE_LIMIT_PER_MIN (default 20/min).
-const RL_WINDOW_MS = 60_000;
-const RL_MAX = Number(process.env.RATE_LIMIT_PER_MIN || 20);
-const rlHits = new Map<string, number[]>();
-function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const fwd = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-  const hits = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
-  if (hits.length >= RL_MAX) {
-    return res.status(429).json({ error: "Too many requests — please wait a minute and try again." });
-  }
-  hits.push(now);
-  rlHits.set(ip, hits);
-  // Evict IPs whose window has fully expired so the map can't grow unbounded on
-  // a long-running server.
-  if (rlHits.size > 1000) {
-    for (const [key, times] of rlHits) {
-      if (times.every((t) => now - t >= RL_WINDOW_MS)) rlHits.delete(key);
-    }
-  }
-  next();
-}
-
-// On Vercel the deployment filesystem is read-only except for the OS temp dir,
-// so JSON persistence writes would throw EROFS and silently fail. Route them to
-// a writable dir there. (Storage is per-instance/ephemeral on serverless — these
-// files back the autonomous/queue internals, not the user's localStorage archive.)
-const DATA_DIR = process.env.VERCEL ? os.tmpdir() : process.cwd();
-const ARCHIVE_FILE = path.join(DATA_DIR, "archive_store.json");
+const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
 
 function loadArchive(): any[] {
   try {
@@ -168,14 +99,8 @@ function configureGit() {
   }
 }
 
-// Push to GitHub helper. Auto-pushing to main caused repeated outages (it
-// overwrote the deploy config and deleted code), so it is OFF unless explicitly
-// enabled via ENABLE_AUTONOMOUS_GIT_PUSH=true.
+// Push to GitHub helper
 function pushToGitHub(niche: string) {
-  if (process.env.ENABLE_AUTONOMOUS_GIT_PUSH !== "true") {
-    console.log("[Git] Auto-push to main is disabled (set ENABLE_AUTONOMOUS_GIT_PUSH=true to enable).");
-    return;
-  }
   try {
     console.log("[Git] Committing and pushing autonomous batch for niche:", niche);
     execSync("git add products/ archive_store.json queue_store.json", { stdio: "inherit" });
@@ -217,6 +142,13 @@ async function runAutonomousWorkflow() {
     return;
   }
   
+  if (!geminiApiKey) {
+    console.log("[Autonomous] Skipping workflow execution because GEMINI_API_KEY is not defined in Settings > Secrets.");
+    autonomousState.status = "failed";
+    autonomousState.error = "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets.";
+    return;
+  }
+  
   autonomousState.isRunning = true;
   autonomousState.status = "brainstorming";
   autonomousState.error = null;
@@ -229,10 +161,10 @@ async function runAutonomousWorkflow() {
     // Step 1: Brainstorm niche via Gemini
     console.log("[Autonomous] Brainstorming fresh niche via Gemini with robust fallback...");
     const baseBrainstormModels = [
-      "gemini-2.5-flash-lite",
+      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
       "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-flash"
+      "gemini-2.5-pro"
     ];
     const brainstormModels = getOrderedModels(baseBrainstormModels);
 
@@ -260,7 +192,7 @@ async function runAutonomousWorkflow() {
           break;
         }
       } catch (err: any) {
-        console.warn(`[Autonomous] Brainstorming with ${bModel} failed:`, err.message || err);
+        console.log(`[Autonomous] Brainstorming with ${bModel} was unresponsive/skipped:`, err.message || err);
         const errorMessage = err.message || "";
         const isTransient = errorMessage.includes("503") || 
                             err.status === 503 || 
@@ -386,16 +318,13 @@ ${result.gumroadBlurb}
   }
 }
 
-// Hourly autonomous workflow. DISABLED by default: it git-pushes to main, which
-// previously clobbered the repo. The /api/autonomous-trigger endpoint still lets
-// you run it manually. Enable the timer only with ENABLE_AUTONOMOUS=true, and
-// never on Vercel (serverless has no persistent timers or writable git).
-if (process.env.ENABLE_AUTONOMOUS === "true" && !process.env.VERCEL) {
-  setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
-  setTimeout(() => {
-    runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
-  }, 15000);
-}
+// Scheduled interval: Hourly (every 60 minutes)
+setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
+
+// Run after a short delay on server boot
+setTimeout(() => {
+  runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
+}, 15000);
 
 interface Task {
   id: string;
@@ -412,7 +341,7 @@ interface Task {
   completedAt?: string;
 }
 
-const DB_FILE = path.join(DATA_DIR, "queue_store.json");
+const DB_FILE = path.join(process.cwd(), "queue_store.json");
 
 function loadQueue(): Task[] {
   try {
@@ -470,15 +399,11 @@ ${language && language !== 'English' ? `CRITICAL: You MUST translate and output 
 
 Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
 
-  // Lead with the models actually provisioned for this key, fastest first.
-  // gemini-3.5-flash / gemini-3.1-flash-lite return persistent 503/404 here, so
-  // they are not used (leading with them wasted every request on dead models —
-  // the health-tracker's cooldowns don't persist across serverless invocations).
   const baseModelsToTry = [
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
+    "gemini-2.5-pro"
   ];
   const modelsToTry = getOrderedModels(baseModelsToTry);
   let lastError: any = null;
@@ -562,19 +487,19 @@ Please output the generated product content and its sales listings in the reques
         if (isTransient) {
           // Immediately demote the overloaded model to prevent trying it for the rest of this batch
           markModelFailure(modelName, 5);
-          console.warn(`[Generator] Transient error on ${modelName}. Switching immediately to the next fallback model...`, errorMessage);
+          console.log(`[Generator] Dynamic shift from ${modelName} due to transient overload. Switching to next model...`, errorMessage);
           break; // break retry loop immediately to try the next healthy model
         } else {
           retryCount++;
           if (retryCount < maxRetries) {
             const delay = (Math.pow(2, retryCount) * 1000) + (Math.random() * 1000);
-            console.warn(`[Generator] Non-transient error on ${modelName} (attempt ${retryCount}/${maxRetries}), retrying in ${Math.round(delay)}ms...`, errorMessage);
+            console.log(`[Generator] Non-transient note on ${modelName} (attempt ${retryCount}/${maxRetries}), retrying in ${Math.round(delay)}ms...`, errorMessage);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
         }
         
-        console.warn(`[Generator] Model ${modelName} failed. Error:`, errorMessage);
+        console.log(`[Generator] Model ${modelName} was bypassed. Note:`, errorMessage);
         break; // break retry loop to try the next model
       }
     }
@@ -626,7 +551,7 @@ async function processQueueRunner() {
 }
 
 // 1. Instant/Synchronous Manufacture Endpoint
-app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
+app.post("/api/manufacture", async (req, res) => {
   try {
     const { productId, niche, angle, language } = req.body;
     const data = await manufactureProduct(productId, niche, angle, language);
@@ -640,207 +565,6 @@ app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
 });
 
 // 2. Queue management endpoints
-// Restored frontend API routes (trends, image, Notion, Shopify) that the
-// autonomous rewrite dropped.
-app.post("/api/shopify/push", async (req, res) => {
-  try {
-    const { title, description, price } = req.body;
-    const token = process.env.SHOPIFY_ACCESS_TOKEN;
-    const domain = process.env.SHOPIFY_STORE_DOMAIN;
-
-    if (!token || !domain) {
-      return res.status(400).json({ error: "Missing SHOPIFY_ACCESS_TOKEN or SHOPIFY_STORE_DOMAIN in environment." });
-    }
-
-    const priceValue = price ? parseFloat(price.replace(/[^0-9.]/g, '')) || 19.99 : 19.99;
-
-    const query = `
-      mutation productCreate($input: ProductInput!) {
-        productCreate(input: $input) {
-          product {
-            id
-            title
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    // Shopify GraphQL API
-    const response = await fetch(`https://${domain}/admin/api/2024-01/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": token
-      },
-      body: JSON.stringify({
-        query,
-        variables: {
-          input: {
-            title: title,
-            descriptionHtml: description,
-            variants: [{
-              price: priceValue.toString()
-            }]
-          }
-        }
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(JSON.stringify(data));
-    }
-    
-    if (data.data?.productCreate?.userErrors?.length > 0) {
-      throw new Error(data.data.productCreate.userErrors[0].message);
-    }
-
-    const productId = data.data?.productCreate?.product?.id?.split('/').pop();
-    
-    res.json({ success: true, url: `https://${domain}/admin/products/${productId}` });
-  } catch (error: any) {
-    console.error("Shopify API Error:", error);
-    res.status(500).json({ error: error.message || "Failed to push to Shopify." });
-  }
-});
-
-app.post("/api/notion/push", async (req, res) => {
-  try {
-    const { title, content } = req.body;
-    const notionKey = process.env.NOTION_API_KEY;
-    const parentPageId = process.env.NOTION_PARENT_PAGE_ID;
-
-    if (!notionKey || !parentPageId) {
-      return res.status(400).json({ error: "Missing NOTION_API_KEY or NOTION_PARENT_PAGE_ID in environment." });
-    }
-
-    const notion = new NotionClient({ auth: notionKey });
-    
-    // Convert content text into rough Notion blocks
-    const children: any[] = [];
-    const lines = content.split('\n');
-    let currentParagraph = "";
-
-    const flushParagraph = () => {
-      if (currentParagraph.trim()) {
-        children.push({
-          object: 'block',
-          type: 'paragraph',
-          paragraph: { rich_text: [{ type: 'text', text: { content: currentParagraph.substring(0, 2000) } }] }
-        });
-        currentParagraph = "";
-      }
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('# ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_1', heading_1: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^# /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('## ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^## /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('### ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^### /, '').substring(0, 2000) } }] } });
-      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        flushParagraph();
-        children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: [{ type: 'text', text: { content: trimmed.replace(/^[-*] /, '').substring(0, 2000) } }] } });
-      } else if (trimmed === '') {
-        flushParagraph();
-      } else {
-        currentParagraph += (currentParagraph ? "\n" : "") + trimmed;
-      }
-    }
-    flushParagraph();
-
-    // Notion limits creation to 100 blocks at once in children array
-    const response = await notion.pages.create({
-      parent: { page_id: parentPageId },
-      properties: {
-        title: {
-          title: [
-            { text: { content: title.substring(0, 2000) } }
-          ]
-        }
-      },
-      children: children.slice(0, 100)
-    });
-
-    res.json({ success: true, url: (response as any).url });
-  } catch (error: any) {
-    console.error("Notion API Error:", error);
-    res.status(500).json({ error: error.message || "Failed to push to Notion." });
-  }
-});
-
-app.get("/api/trends", rateLimit, async (req, res) => {
-  try {
-    const response = await generateText({
-      contents: "Return a JSON array of 5 currently trending digital product niches or target audiences, just 5 strings answering the query. Be specific, like 'ADHD Notion Creators', not just 'ADHD'.",
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.STRING
-          }
-        }
-      }
-    });
-    const trends = JSON.parse(response.text || "[]");
-    res.json({ trends });
-  } catch (error: any) {
-    console.error("Trends Error:", error);
-    res.status(500).json({ error: error.message || "Failed to fetch trends." });
-  }
-});
-
-app.post("/api/image/generate", rateLimit, requireQuota(), async (req, res) => {
-  try {
-    const { productTitle, niche } = req.body;
-    
-    if (!productTitle) {
-      return res.status(400).json({ error: "Product title required for cover art generation." });
-    }
-
-    const prompt = `A clean, elegant, premium, modern graphical cover for a digital product targeting ${niche || 'creators'}. The product is named: "${productTitle}". Best suited for a digital download product card, minimal style.`;
-    
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{ text: prompt }]
-      },
-      config: {
-        imageConfig: { aspectRatio: "4:3" }
-      }
-    });
-
-    let imageUrl = null;
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        const base64EncodeString = part.inlineData.data;
-        const mimeType = part.inlineData.mimeType || "image/jpeg";
-        imageUrl = `data:${mimeType};base64,${base64EncodeString}`;
-        break;
-      }
-    }
-
-    if (!imageUrl) {
-      throw new Error("No image generated");
-    }
-    
-    res.json({ imageUrl });
-  } catch (error: any) {
-    console.error("Image Generation Error:", error);
-    res.status(500).json({ error: error.message || "Failed to generate image." });
-  }
-});
-
 app.get("/api/queue", (req, res) => {
   res.json({ tasks: taskQueue });
 });
@@ -967,12 +691,86 @@ app.post("/api/archive/remove", (req, res) => {
   }
 });
 
+// Trending Niches using Google Search integration via Gemini
+app.get("/api/trending-niches", async (req, res) => {
+  if (!geminiApiKey) {
+    return res.status(400).json({ error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." });
+  }
+
+  const query = (req.query.q as string) || "currently trending digital product niches 2026";
+  
+  const searchModels = getOrderedModels([
+    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro"
+  ]);
+
+  let lastError: any = null;
+
+  for (const modelName of searchModels) {
+    try {
+      console.log(`[Trends] Querying trends with model ${modelName} for search: "${query}"`);
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: `Use Google Search to analyze and identify 5 highly relevant, active, and real-time trending digital product niches right now based on this user query: "${query}". Ensure the niches are specific, realistic, and highly lucrative for digital creators. For each niche, provide the primary niche name (e.g. "Shopify Dropshippers" or "Aesthetic Notion Creators"), a brief explanation of why it is currently trending/in-demand, and an example product concept (e.g. "30-Day Email Marketing Planner"). Do not return placeholders.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                niche: { type: Type.STRING },
+                whyTrending: { type: Type.STRING },
+                exampleConcept: { type: Type.STRING },
+              },
+              required: ["niche", "whyTrending", "exampleConcept"],
+            },
+          },
+          tools: [{ googleSearch: {} }],
+        },
+      });
+
+      const text = response.text;
+      if (text) {
+        const parsed = JSON.parse(text);
+        return res.json({ success: true, trends: parsed, modelUsed: modelName });
+      }
+    } catch (err: any) {
+      console.warn(`[Trends] Failed with model ${modelName}:`, err.message || err);
+      lastError = err;
+      
+      const errorMessage = err.message || "";
+      const isTransient = errorMessage.includes("503") || 
+                          err.status === 503 || 
+                          errorMessage.includes("429") ||
+                          errorMessage.includes("UNAVAILABLE") ||
+                          errorMessage.includes("high demand") ||
+                          errorMessage.includes("overloaded");
+      if (isTransient) {
+        markModelFailure(modelName, 5);
+      }
+    }
+  }
+
+  return res.status(500).json({ 
+    error: lastError?.message || "Failed to retrieve trending niches using Google Search integration." 
+  });
+});
+
 // 4. Autonomous Scheduler API endpoints
 app.get("/api/autonomous-status", (req, res) => {
-  return res.json(autonomousState);
+  return res.json({
+    ...autonomousState,
+    hasApiKey: !!geminiApiKey
+  });
 });
 
 app.post("/api/autonomous-trigger", (req, res) => {
+  if (!geminiApiKey) {
+    return res.status(400).json({ error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." });
+  }
   if (autonomousState.isRunning) {
     return res.status(400).json({ error: "Autonomous background generator is already actively running." });
   }
@@ -981,22 +779,13 @@ app.post("/api/autonomous-trigger", (req, res) => {
   return res.json({ success: true, message: "Autonomous hourly product batch generator triggered." });
 });
 
-// Auto-run queue processing on startup (standalone server only; serverless
-// functions have no persistent process or writable filesystem for the queue).
-if (!process.env.VERCEL) {
-  processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
-}
+// Auto-run processing on server startup if any pending items exist
+processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
 
 
-// Standalone server bootstrap (dev: Vite middleware; prod: static dist/) + listen.
-// On Vercel the app runs as a serverless function (see api/index.ts) which
-// imports the exported `app`, so this bootstrap is skipped there.
+// Setup Vite Dev Middleware / Static files serving
 async function mountViteMiddleware() {
   if (process.env.NODE_ENV !== "production") {
-    // Dynamic import via a variable specifier so Vite (a devDependency) is never
-    // pulled into the production esbuild bundle or the Vercel function trace.
-    const viteSpecifier = "vite";
-    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1015,10 +804,4 @@ async function mountViteMiddleware() {
   });
 }
 
-// Vercel sets process.env.VERCEL; there the app is consumed as a serverless
-// handler and must not call listen().
-if (!process.env.VERCEL) {
-  mountViteMiddleware();
-}
-
-export default app;
+mountViteMiddleware();
