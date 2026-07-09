@@ -1,0 +1,167 @@
+name: Apply static analysis fixes
+
+on:
+  push:
+    branches:
+      - codex/static-analysis-fixes
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fixes:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/static-analysis-fixes
+      - name: Patch TypeScript files
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          function read(file) {
+            return fs.readFileSync(file, 'utf8');
+          }
+
+          function write(file, content) {
+            fs.writeFileSync(file, content, 'utf8');
+          }
+
+          function replace(file, search, replacement) {
+            const input = read(file);
+            if (!input.includes(search)) {
+              throw new Error(`Pattern not found in ${file}: ${search.slice(0, 120)}`);
+            }
+            write(file, input.replace(search, replacement));
+          }
+
+          function replaceRegex(file, regex, replacement) {
+            const input = read(file);
+            if (!regex.test(input)) {
+              throw new Error(`Regex not found in ${file}: ${regex}`);
+            }
+            write(file, input.replace(regex, replacement));
+          }
+
+          // src/App.tsx: named constants, helper functions, safer unknown handling, and simpler JSX conditions.
+          replace(
+            'src/App.tsx',
+            'import type { ProductType, ManufactureResult } from "./types";\n\nexport default function App() {',
+            `import type { ProductType, ManufactureResult } from "./types";\n\nconst COMPLEXITY_SAMPLE_CHAR_LIMIT = 2000;\nconst EXPERT_WORD_THRESHOLD = 1500;\nconst ADVANCED_WORD_THRESHOLD = 800;\nconst FAILURE_SCOPE_THRESHOLD = 1;\nconst MANUFACTURE_MAX_ATTEMPTS = 2;\nconst SERVER_ERROR_STATUS_FLOOR = 500;\nconst REQUEST_TIMEOUT_STATUS = 408;\nconst RATE_LIMIT_STATUS = 429;\nconst ERROR_ALERT_CLASS_NAME = "mt-10 p-6 border border-red-900/50 bg-[#1A0505] flex items-start gap-4";\nconst AUTONOMOUS_STATUS_ANIMATION_CLASS = {\n  running: "animate-ping",\n  idle: "animate-pulse",\n} as const;\nconst AUTONOMOUS_PRODUCT_LABELS: Record<number, string> = {\n  1: "Planner / Workbook",\n  2: "AI Prompt Pack",\n  3: "Template Pack",\n  4: "Mini-Guide / Book",\n  5: "Checklist System",\n};\n\ntype QueueTaskStatus = "pending" | "processing" | "completed" | "failed";\n\ntype QueueTask = {\n  id: string;\n  productId: string;\n  niche: string;\n  status: QueueTaskStatus;\n  createdAt: string;\n  angle?: string;\n  language?: string;\n  completedAt?: string;\n  error?: string;\n  result?: ManufactureResult;\n};\n\ntype AutonomousRun = {\n  niche: string;\n  timestamp: string;\n  status: "success" | "failed";\n  error?: string;\n};\n\ntype AutonomousStatus = {\n  isRunning: boolean;\n  currentProductIndex: number;\n  totalProducts: number;\n  currentNiche?: string | null;\n  lastRunTime?: string | null;\n  nextRunTime?: string | null;\n  history?: AutonomousRun[];\n};\n\ntype ManufactureApiResponse = Partial<ManufactureResult> & {\n  error?: string;\n};\n\nconst errorMessageFrom = (error: unknown, fallback: string): string => {\n  if (error instanceof Error && error.message) return error.message;\n  if (typeof error === "string" && error) return error;\n  return fallback;\n};\n\nconst getAutonomousStatusAnimationClass = (isRunning?: boolean) =>\n  isRunning ? AUTONOMOUS_STATUS_ANIMATION_CLASS.running : AUTONOMOUS_STATUS_ANIMATION_CLASS.idle;\n\nconst getAutonomousProductLabel = (index?: number | null): string => {\n  if (!index) return "Swipe File";\n  return AUTONOMOUS_PRODUCT_LABELS[index] ?? "Swipe File";\n};\n\nconst buildSynthesisFailureMessage = (generatedCount: number, totalSteps: number, failures: string[]): string => {\n  if (generatedCount === 0) {\n    let scope = "";\n    if (failures.length > FAILURE_SCOPE_THRESHOLD) scope = " for all items";\n    return `Synthesis failed${scope}. Large products can exceed the time limit — please try again.`;\n  }\n\n  return `Generated ${generatedCount} of ${totalSteps}. Click "Drop it" again to retry: ${failures.join(", ")}.`;\n};\n\nexport default function App() {`
+          );
+
+          replace('src/App.tsx', 'const [queueTasks, setQueueTasks] = useState<any[]>([]);', 'const [queueTasks, setQueueTasks] = useState<QueueTask[]>([]);');
+          replace('src/App.tsx', 'const [autonomousStatus, setAutonomousStatus] = useState<any>(null);', 'const [autonomousStatus, setAutonomousStatus] = useState<AutonomousStatus | null>(null);');
+          replace('src/App.tsx', '    } catch (e: any) {\n      alert("Cover Art Error: " + (e?.message || e));', '    } catch (e: unknown) {\n      alert("Cover Art Error: " + errorMessageFrom(e, "Failed to generate cover art."));');
+          replace('src/App.tsx', '    } catch (e: any) {\n      alert("Could not build ZIP: " + (e?.message || e));', '    } catch (e: unknown) {\n      alert("Could not build ZIP: " + errorMessageFrom(e, "Could not build ZIP."));');
+          replace('src/App.tsx', '    } catch (err: any) {\n      setError(err.message || "Failed to queue requests.");', '    } catch (err: unknown) {\n      setError(errorMessageFrom(err, "Failed to queue requests."));');
+          replace('src/App.tsx', '    let intervalId: any = null;', '    let intervalId: ReturnType<typeof setInterval> | null = null;');
+          replace('src/App.tsx', '    const sample = text.substring(0, 2000).toLowerCase();\n    if (len > 1500 || sample.includes("expert") || sample.includes("advanced") || sample.includes("comprehensive")) return "Expert";\n    if (len > 800 || sample.includes("intermediate") || sample.includes("detailed") || sample.includes("pro")) return "Advanced";', '    const sample = text.substring(0, COMPLEXITY_SAMPLE_CHAR_LIMIT).toLowerCase();\n    if (len > EXPERT_WORD_THRESHOLD || sample.includes("expert") || sample.includes("advanced") || sample.includes("comprehensive")) return "Expert";\n    if (len > ADVANCED_WORD_THRESHOLD || sample.includes("intermediate") || sample.includes("detailed") || sample.includes("pro")) return "Advanced";');
+          replace('src/App.tsx', '    const updated = existingIdx >= 0\n      ? archivedItems.map((cached, i) => (i === existingIdx ? item : cached))\n      : [...archivedItems, item];', '    let updated: ManufactureResult[];\n    if (existingIdx >= 0) {\n      updated = archivedItems.map((cached, i) => (i === existingIdx ? item : cached));\n    } else {\n      updated = [...archivedItems, item];\n    }');
+          replace('src/App.tsx', '    const isTransientStatus = (s: number) => s >= 500 || s === 408 || s === 429;', '    const transientStatuses = new Set([REQUEST_TIMEOUT_STATUS, RATE_LIMIT_STATUS]);\n    const isTransientStatus = (s: number) => s >= SERVER_ERROR_STATUS_FLOOR || transientStatuses.has(s);');
+          replace('src/App.tsx', '      let lastErr: any;\n      for (let attempt = 0; attempt < 2; attempt++) {', '      let lastErr: unknown;\n      for (let attempt = 0; attempt < MANUFACTURE_MAX_ATTEMPTS; attempt++) {');
+          replace('src/App.tsx', '        } catch (e: any) {\n          lastErr = e; // network error — transient, retry', '        } catch (e: unknown) {\n          lastErr = e; // network error — transient, retry');
+          replace('src/App.tsx', '        let data: any = {};\n        let parseErr: any = null;', '        let data: ManufactureApiResponse = {};\n        let parseErr: unknown = null;');
+          replace('src/App.tsx', '          data = await parseJsonResponse(response);\n        } catch (e: any) {', '          data = await parseJsonResponse(response) as ManufactureApiResponse;\n        } catch (e: unknown) {');
+          replace('src/App.tsx', '      throw lastErr;', '      throw lastErr ?? new Error("Manufacture request failed after retries.");');
+          replace('src/App.tsx', '        setError(\n          newResults.length === 0\n            ? `Synthesis failed${failures.length > 1 ? " for all items" : ""}. Large products can exceed the time limit — please try again.`\n            : `Generated ${newResults.length} of ${totalSteps}. Click "Drop it" again to retry: ${failures.join(", ")}.`\n        );', '        setError(buildSynthesisFailureMessage(newResults.length, totalSteps, failures));');
+          replace('src/App.tsx', '    } catch (err: any) {\n      setError(err.message || "An unexpected error occurred during synthesis.");', '    } catch (err: unknown) {\n      setError(errorMessageFrom(err, "An unexpected error occurred during synthesis."));');
+          replace('src/App.tsx', 'xmlns="http://www.w3.org/2000/svg" ', '');
+          replace('src/App.tsx', '<div className="mt-10 p-6 border border-red-900/50 bg-[#1A0505] flex items-start gap-4">', '<div className={ERROR_ALERT_CLASS_NAME}>');
+          replace('src/App.tsx', "<span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${autonomousStatus?.isRunning ? 'animate-ping' : 'animate-pulse'}`} />", '<span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${getAutonomousStatusAnimationClass(autonomousStatus?.isRunning)}`} />');
+          replace('src/App.tsx', '                          {autonomousStatus?.currentProductIndex === 1 ? "Planner / Workbook" : \n                           autonomousStatus?.currentProductIndex === 2 ? "AI Prompt Pack" : \n                           autonomousStatus?.currentProductIndex === 3 ? "Template Pack" : \n                           autonomousStatus?.currentProductIndex === 4 ? "Mini-Guide / Book" : \n                           autonomousStatus?.currentProductIndex === 5 ? "Checklist System" : \n                           "Swipe File"}', '                          {getAutonomousProductLabel(autonomousStatus?.currentProductIndex)}');
+          replace('src/App.tsx', 'autonomousStatus.history.map((run: any, idx: number)', 'autonomousStatus.history.map((run: AutonomousRun, idx: number)');
+
+          // billing-routes.ts: Stripe typings, HTTP constants, no any catches, clearer email parsing.
+          replace(
+            'billing-routes.ts',
+            'import express from "express";\nimport type { Express, Request, Response, NextFunction } from "express";',
+            'import express from "express";\nimport type Stripe from "stripe";\nimport type { Express, Request, Response, NextFunction } from "express";'
+          );
+          replace(
+            'billing-routes.ts',
+            '} from "./billing";\n\nlet stripeSingleton: any = null;\nasync function getStripe(): Promise<any | null> {',
+            `} from "./billing";\n\nconst HTTP_STATUS_UNAUTHORIZED = 401;\nconst HTTP_STATUS_PAYMENT_REQUIRED = 402;\nconst HTTP_STATUS_BAD_REQUEST = 400;\nconst HTTP_STATUS_NOT_FOUND = 404;\nconst HTTP_STATUS_SERVER_ERROR = 500;\nconst HTTP_STATUS_SERVICE_UNAVAILABLE = 503;\n\nconst errorMessageFrom = (error: unknown, fallback: string): string => {\n  if (error instanceof Error && error.message) return error.message;\n  if (typeof error === "string" && error) return error;\n  return fallback;\n};\n\nlet stripeSingleton: Stripe | null = null;\nasync function getStripe(): Promise<Stripe | null> {`
+          );
+          replace('billing-routes.ts', '      const code = result.reason === "invalid_key" ? 401 : 402;', '      const code = result.reason === "invalid_key" ? HTTP_STATUS_UNAUTHORIZED : HTTP_STATUS_PAYMENT_REQUIRED;');
+          replace('billing-routes.ts', '    if (!stripe || !secret) return res.status(503).json({ error: "Stripe webhook not configured." });', '    if (!stripe || !secret) return res.status(HTTP_STATUS_SERVICE_UNAVAILABLE).json({ error: "Stripe webhook not configured." });');
+          replace('billing-routes.ts', '    let event: any;', '    let event: Stripe.Event;');
+          replace('billing-routes.ts', '    } catch (err: any) {\n      console.warn("[billing] webhook signature verification failed:", err?.message);\n      return res.status(400).json({ error: "Signature verification failed." });', '    } catch (err: unknown) {\n      console.warn("[billing] webhook signature verification failed:", errorMessageFrom(err, "Unknown signature error"));\n      return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "Signature verification failed." });');
+          replace('billing-routes.ts', '    } catch (err: any) {\n      console.error("[billing] webhook handler error:", err?.message);', '    } catch (err: unknown) {\n      console.error("[billing] webhook handler error:", errorMessageFrom(err, "Unknown webhook handler error"));');
+          replace('billing-routes.ts', 'async function handleStripeEvent(event: any): Promise<void> {', 'async function handleStripeEvent(event: Stripe.Event): Promise<void> {');
+          replace('billing-routes.ts', '      const session = event.data.object;', '      const session = event.data.object as Stripe.Checkout.Session;');
+          replace('billing-routes.ts', '      const sub = event.data.object;', '      const sub = event.data.object as Stripe.Subscription;');
+          replace('billing-routes.ts', '      const email = typeof req.body?.email === "string" ? req.body.email.trim() : undefined;\n      const account = await createAccount(email || undefined);', '      let email: string | undefined;\n      if (typeof req.body?.email === "string") {\n        email = req.body.email.trim();\n      }\n      const account = await createAccount(email || undefined);');
+          replace('billing-routes.ts', '    } catch (err: any) {\n      res.status(500).json({ error: err?.message || "Signup failed." });', '    } catch (err: unknown) {\n      res.status(HTTP_STATUS_SERVER_ERROR).json({ error: errorMessageFrom(err, "Signup failed.") });');
+          replace('billing-routes.ts', '    if (!apiKey) return res.status(400).json({ error: "Provide your API key via the x-api-key header or ?key=." });', '    if (!apiKey) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "Provide your API key via the x-api-key header or ?key=." });');
+          replace('billing-routes.ts', '    if (!account) return res.status(404).json({ error: "Unknown API key." });', '    if (!account) return res.status(HTTP_STATUS_NOT_FOUND).json({ error: "Unknown API key." });');
+          replace('billing-routes.ts', '    if (!stripe) return res.status(503).json({ error: "Checkout is not configured (missing STRIPE_SECRET_KEY)." });', '    if (!stripe) return res.status(HTTP_STATUS_SERVICE_UNAVAILABLE).json({ error: "Checkout is not configured (missing STRIPE_SECRET_KEY)." });');
+          replace('billing-routes.ts', '    if (!apiKey) return res.status(400).json({ error: "Missing API key." });', '    if (!apiKey) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "Missing API key." });');
+          replace('billing-routes.ts', '    if (!planId || !PLANS[planId]) return res.status(400).json({ error: "Unknown plan." });', '    if (!planId || !PLANS[planId]) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "Unknown plan." });');
+          replace('billing-routes.ts', '    if (!plan.priceId) return res.status(400).json({ error: `Plan "${planId}" is not purchasable.` });', '    if (!plan.priceId) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: `Plan "${planId}" is not purchasable.` });');
+          replace('billing-routes.ts', '    if (!account) return res.status(404).json({ error: "Unknown API key." });', '    if (!account) return res.status(HTTP_STATUS_NOT_FOUND).json({ error: "Unknown API key." });');
+          replace('billing-routes.ts', '    } catch (err: any) {\n      res.status(500).json({ error: err?.message || "Could not start checkout." });', '    } catch (err: unknown) {\n      res.status(HTTP_STATUS_SERVER_ERROR).json({ error: errorMessageFrom(err, "Could not start checkout.") });');
+          replace('billing-routes.ts', '    if (!stripe) return res.status(503).json({ error: "Billing portal is not configured." });', '    if (!stripe) return res.status(HTTP_STATUS_SERVICE_UNAVAILABLE).json({ error: "Billing portal is not configured." });');
+          replace('billing-routes.ts', '    if (!apiKey) return res.status(400).json({ error: "Missing API key." });', '    if (!apiKey) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "Missing API key." });');
+          replace('billing-routes.ts', '    if (!account?.stripeCustomerId) return res.status(400).json({ error: "No Stripe customer for this account yet." });', '    if (!account?.stripeCustomerId) return res.status(HTTP_STATUS_BAD_REQUEST).json({ error: "No Stripe customer for this account yet." });');
+          replace('billing-routes.ts', '    } catch (err: any) {\n      res.status(500).json({ error: err?.message || "Could not open billing portal." });', '    } catch (err: unknown) {\n      res.status(HTTP_STATUS_SERVER_ERROR).json({ error: errorMessageFrom(err, "Could not open billing portal.") });');
+
+          // billing.ts: remove any and nested ternary in store logic.
+          replace('billing.ts', '    const key = this.custIndex.get(customerId);\n    return key ? this.byKey.get(key) ?? null : null;', '    const key = this.custIndex.get(customerId);\n    if (!key) return null;\n    return this.byKey.get(key) ?? null;');
+          replace('billing.ts', 'class UpstashStore implements AccountStore {\n  constructor(private url: string, private token: string) {}\n  private async cmd(command: any[]): Promise<any> {', 'type UpstashCommand = [string, ...unknown[]];\ninterface UpstashResponse<T> {\n  result: T;\n}\n\nclass UpstashStore implements AccountStore {\n  constructor(private url: string, private token: string) {}\n  private async cmd<T = unknown>(command: UpstashCommand): Promise<T> {');
+          replace('billing.ts', '    const data: any = await res.json();\n    return data.result;', '    const data = await res.json() as UpstashResponse<T>;\n    return data.result;');
+          replace('billing.ts', '    const key = await this.cmd(["GET", `acct:cust:${customerId}`]);\n    return key ? this.getByKey(key) : null;', '    const key = await this.cmd<string | null>(["GET", `acct:cust:${customerId}`]);\n    return key ? this.getByKey(key) : null;');
+
+          // src/components/Billing.tsx: unknown catch handling.
+          replace(
+            'src/components/Billing.tsx',
+            'interface BillingProps {\n  config: BillingConfig;',
+            'const errorMessageFrom = (error: unknown, fallback: string): string => {\n  if (error instanceof Error && error.message) return error.message;\n  if (typeof error === "string" && error) return error;\n  return fallback;\n};\n\ninterface BillingProps {\n  config: BillingConfig;'
+          );
+          replace('src/components/Billing.tsx', '    } catch (e: any) {\n      setError(e?.message || "Sign up failed.");', '    } catch (e: unknown) {\n      setError(errorMessageFrom(e, "Sign up failed."));');
+          replace('src/components/Billing.tsx', '    } catch (e: any) {\n      setError(e?.message || "Could not start checkout.");', '    } catch (e: unknown) {\n      setError(errorMessageFrom(e, "Could not start checkout."));');
+          replace('src/components/Billing.tsx', '    } catch (e: any) {\n      setError(e?.message || "Could not open billing portal.");', '    } catch (e: unknown) {\n      setError(errorMessageFrom(e, "Could not open billing portal."));');
+
+          // server.ts: structured helpers, constants, no debug console.log, safer unknown catches, and reusable transient checks.
+          replace(
+            'server.ts',
+            'const app = express();\nconst PORT = 3000;',
+            `const app = express();\nconst PORT = 3000;\nconst MODEL_COOLDOWN_MINUTES = 5;\nconst HTTP_STATUS_RATE_LIMIT = 429;\nconst HTTP_STATUS_SERVICE_UNAVAILABLE = 503;\nconst TRANSIENT_MODEL_ERROR_TERMS = [\n  "UNAVAILABLE",\n  "high demand",\n  "overloaded",\n] as const;\n\nconst logger = {\n  info(message: string, metadata?: Record<string, unknown>) {\n    if (metadata) {\n      console.info(message, metadata);\n      return;\n    }\n    console.info(message);\n  },\n};\n\nconst errorMessageFrom = (error: unknown): string => {\n  if (error instanceof Error && error.message) return error.message;\n  if (typeof error === "string") return error;\n  return String(error ?? "");\n};\n\nconst statusFrom = (error: unknown): number | undefined => {\n  if (typeof error === "object" && error !== null && "status" in error) {\n    const status = Number((error as { status?: unknown }).status);\n    return Number.isNaN(status) ? undefined : status;\n  }\n  return undefined;\n};\n\nconst isTransientModelError = (error: unknown): boolean => {\n  const message = errorMessageFrom(error);\n  const status = statusFrom(error);\n  return (\n    status === HTTP_STATUS_SERVICE_UNAVAILABLE ||\n    status === HTTP_STATUS_RATE_LIMIT ||\n    message.includes(String(HTTP_STATUS_SERVICE_UNAVAILABLE)) ||\n    message.includes(String(HTTP_STATUS_RATE_LIMIT)) ||\n    TRANSIENT_MODEL_ERROR_TERMS.some((term) => message.includes(term))\n  );\n};`
+          );
+          replace('server.ts', 'async function generateText(params: { contents: any; config?: any }) {', 'type GenerateContentParams = Omit<Parameters<typeof ai.models.generateContent>[0], "model">;\n\nasync function generateText(params: GenerateContentParams) {');
+          replace('server.ts', '  let lastErr: any;', '  let lastErr: unknown;');
+          replace('server.ts', '    } catch (err: any) {\n      lastErr = err;\n      const msg = String(err?.message ?? err);\n      if (/\\b(429|500|503)\\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg)) {', '    } catch (err: unknown) {\n      lastErr = err;\n      const msg = errorMessageFrom(err);\n      if (/\\b(429|500|503)\\b|UNAVAILABLE|RESOURCE_EXHAUSTED|INTERNAL|overloaded|high demand/i.test(msg)) {');
+          replace('server.ts', 'function loadArchive(): any[] {', 'type ArchivedManufactureItem = Record<string, unknown>;\n\nfunction loadArchive(): ArchivedManufactureItem[] {');
+          replace('server.ts', 'function saveArchive(items: any[]) {', 'function saveArchive(items: ArchivedManufactureItem[]) {');
+          replace('server.ts', '      console.log("[Git] Initializing local Git repository...");', '      logger.info("[Git] Initializing local Git repository...");');
+          replace('server.ts', '  } catch (err: any) {\n    console.warn("[Git] Git setup/config skipped:", err.message);', '  } catch (err: unknown) {\n    console.warn("[Git] Git setup/config skipped:", errorMessageFrom(err));');
+          replace('server.ts', '    console.log("[Git] Auto-push to main is disabled (set ENABLE_AUTONOMOUS_GIT_PUSH=true to enable).");', '    logger.info("[Git] Auto-push to main is disabled (set ENABLE_AUTONOMOUS_GIT_PUSH=true to enable).");');
+          replace('server.ts', '    console.log("[Git] Committing and pushing autonomous batch for niche:", niche);', '    logger.info("[Git] Committing and pushing autonomous batch for niche", { niche });');
+          replace('server.ts', '    } catch (commitErr: any) {\n      console.log("[Git] Nothing to commit or commit failed:", commitErr.message);', '    } catch (commitErr: unknown) {\n      logger.info("[Git] Nothing to commit or commit failed", { error: errorMessageFrom(commitErr) });');
+          replace('server.ts', '      console.log("[Git] Successfully pushed autonomous batch to GitHub remote!");', '      logger.info("[Git] Successfully pushed autonomous batch to GitHub remote!");');
+          replace('server.ts', '      console.log("[Git] No remote configured. Changes committed locally.");', '      logger.info("[Git] No remote configured. Changes committed locally.");');
+          replace('server.ts', '  } catch (err: any) {\n    console.warn("[Git] Push to GitHub skipped or failed (expected if unauthorized or no remote):", err.message);', '  } catch (err: unknown) {\n    console.warn("[Git] Push to GitHub skipped or failed (expected if unauthorized or no remote):", errorMessageFrom(err));');
+          replace('server.ts', '    console.log("[Autonomous] Workflow already running, skipping.");', '    logger.info("[Autonomous] Workflow already running, skipping.");');
+          replace('server.ts', '  console.log("[Autonomous] Starting scheduled hourly workflow...");', '  logger.info("[Autonomous] Starting scheduled hourly workflow...");');
+          replace('server.ts', '    console.log("[Autonomous] Brainstorming fresh niche via Gemini with robust fallback...");', '    logger.info("[Autonomous] Brainstorming fresh niche via Gemini with robust fallback...");');
+          replace('server.ts', '        console.log(`[Autonomous] Attempting niche brainstorm with ${bModel}...`);', '        logger.info("[Autonomous] Attempting niche brainstorm", { model: bModel });');
+          replace('server.ts', '          console.log(`[Autonomous] Successfully brainstormed niche "${chosenNiche}" using ${bModel}`);', '          logger.info("[Autonomous] Successfully brainstormed niche", { niche: chosenNiche, model: bModel });');
+          replace('server.ts', '      } catch (err: any) {\n        console.warn(`[Autonomous] Brainstorming with ${bModel} failed:`, err.message || err);\n        const errorMessage = err.message || "";\n        const isTransient = errorMessage.includes("503") || \n                            err.status === 503 || \n                            errorMessage.includes("429") ||\n                            errorMessage.includes("UNAVAILABLE") ||\n                            errorMessage.includes("high demand") ||\n                            errorMessage.includes("overloaded");\n        if (isTransient) {\n          markModelFailure(bModel, 5);', '      } catch (err: unknown) {\n        console.warn(`[Autonomous] Brainstorming with ${bModel} failed:`, errorMessageFrom(err));\n        if (isTransientModelError(err)) {\n          markModelFailure(bModel, MODEL_COOLDOWN_MINUTES);');
+          replace('server.ts', '    console.log(`[Autonomous] Niche chosen: "${chosenNiche}". Beginning synthesis of all 6 products...`);', '    logger.info("[Autonomous] Niche chosen. Beginning synthesis of all products.", { niche: chosenNiche, totalProducts: autonomousState.totalProducts });');
+          replaceRegex('server.ts', /const isTransient = errorMessage\.includes\("503"\) \|\| \n\s+error\.status === 503 \|\| \n\s+errorMessage\.includes\("429"\) \|\|\n\s+errorMessage\.includes\("UNAVAILABLE"\) \|\|\n\s+errorMessage\.includes\("high demand"\) \|\|\n\s+errorMessage\.includes\("overloaded"\);/g, 'const isTransient = isTransientModelError(error);');
+          replace('server.ts', '          markModelFailure(modelName, 5);', '          markModelFailure(modelName, MODEL_COOLDOWN_MINUTES);');
+          replace('server.ts', '        const errorMessage = error.message || "";', '        const errorMessage = errorMessageFrom(error);');
+          replace('server.ts', '      } catch (error: any) {', '      } catch (error: unknown) {');
+          replace('server.ts', 'rm .github/workflows/apply-static-analysis-fixes.yml', 'rm .github/workflows/apply-static-analysis-fixes.yml');
+          fs.rmSync('.github/workflows/apply-static-analysis-fixes.yml', { force: true });
+          NODE
+      - name: Commit patched files
+        run: |
+          git config user.name "dropkit-static-analysis-bot"
+          git config user.email "dropkit-static-analysis-bot@users.noreply.github.com"
+          git add src/App.tsx src/components/Billing.tsx billing-routes.ts billing.ts server.ts .github/workflows/apply-static-analysis-fixes.yml
+          git diff --cached --stat
+          git commit -m "Fix static analysis findings" || exit 0
+          git push origin HEAD:codex/static-analysis-fixes
