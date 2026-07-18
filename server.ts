@@ -759,6 +759,63 @@ app.get("/api/trending-niches", async (req, res) => {
   });
 });
 
+// Semantic Product Type Detection
+app.post("/api/detect-format", async (req, res) => {
+  if (!geminiApiKey) {
+    return res.status(400).json({ error: "GEMINI_API_KEY is not defined." });
+  }
+  const { niche } = req.body;
+  if (!niche) return res.status(400).json({ error: "Niche is required." });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: `Analyze the user's niche/request: "${niche}". Decide which of the following 6 digital product formats is the absolute best fit to create for this request: planner, prompts, templates, guide, checklist, swipe. Return ONLY a JSON object with 'format' string and 'reason' string.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            format: { type: Type.STRING, enum: ["planner", "prompts", "templates", "guide", "checklist", "swipe"] },
+            reason: { type: Type.STRING }
+          },
+          required: ["format", "reason"]
+        }
+      }
+    });
+    return res.json(JSON.parse(response.text || "{}"));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Semantic Tags Suggestion
+app.post("/api/suggest-tags", async (req, res) => {
+  if (!geminiApiKey) return res.status(400).json({ error: "No API key" });
+  const { query } = req.body;
+  if (!query) return res.json({ tags: [] });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents: `Given the target audience or niche: "${query}", suggest 5 relevant secondary keywords or related micro-niches that the user could target. Return JSON with 'tags' array of strings. Keep them under 3 words each.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            tags: { type: Type.ARRAY, items: { type: Type.STRING } }
+          },
+          required: ["tags"]
+        }
+      }
+    });
+    return res.json(JSON.parse(response.text || "{}"));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // 4. Autonomous Scheduler API endpoints
 app.get("/api/autonomous-status", (req, res) => {
   return res.json({
