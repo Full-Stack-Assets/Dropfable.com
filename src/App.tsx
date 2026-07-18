@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { PRODUCTS, PRESET_NICHES } from "./constants";
-import { ProductType, ManufactureResult, NICHE_TREND_DATA } from "./types";
+import { PRODUCTS } from "./constants";
+import { ProductType, ManufactureResult, NICHE_TREND_DATA, PRESET_NICHES } from "./types";
 import { ArchiveView } from "./components/ArchiveView";
 import { LineChart, Line, ResponsiveContainer, YAxis } from "recharts";
 import { 

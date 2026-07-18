@@ -194,6 +194,12 @@ async function runAutonomousWorkflow() {
       } catch (err: any) {
         console.log(`[Autonomous] Brainstorming with ${bModel} was unresponsive/skipped:`, err.message || err);
         const errorMessage = err.message || "";
+        const isAuthError = errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || err.status === 401 || errorMessage.includes("401");
+        if (isAuthError) {
+          console.error("[Autonomous] Invalid API Key detected.");
+          autonomousState.isRunning = false;
+          return;
+        }
         const isTransient = errorMessage.includes("503") || 
                             err.status === 503 || 
                             errorMessage.includes("429") ||
@@ -477,6 +483,12 @@ Please output the generated product content and its sales listings in the reques
       } catch (error: any) {
         lastError = error;
         const errorMessage = error.message || "";
+        
+        const isAuthError = errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || error.status === 401 || errorMessage.includes("401");
+        if (isAuthError) {
+          throw new Error("The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets.");
+        }
+        
         const isTransient = errorMessage.includes("503") || 
                             error.status === 503 || 
                             errorMessage.includes("429") ||
@@ -742,6 +754,11 @@ app.get("/api/trending-niches", async (req, res) => {
       lastError = err;
       
       const errorMessage = err.message || "";
+      const isAuthError = errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || err.status === 401 || errorMessage.includes("401");
+      if (isAuthError) {
+        return res.status(401).json({ error: "The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets." });
+      }
+      
       const isTransient = errorMessage.includes("503") || 
                           err.status === 503 || 
                           errorMessage.includes("429") ||
@@ -785,6 +802,11 @@ app.post("/api/detect-format", async (req, res) => {
     });
     return res.json(JSON.parse(response.text || "{}"));
   } catch (err: any) {
+    const errorMessage = err.message || "";
+    const isAuthError = errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || err.status === 401 || errorMessage.includes("401");
+    if (isAuthError) {
+      return res.status(401).json({ error: "The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets." });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
@@ -812,6 +834,11 @@ app.post("/api/suggest-tags", async (req, res) => {
     });
     return res.json(JSON.parse(response.text || "{}"));
   } catch (err: any) {
+    const errorMessage = err.message || "";
+    const isAuthError = errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || err.status === 401 || errorMessage.includes("401");
+    if (isAuthError) {
+      return res.status(401).json({ error: "The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets." });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
