@@ -402,6 +402,11 @@ export default function App() {
                       {trendsLoading ? "Scanning..." : "Scan"}
                     </button>
                   </div>
+                  {trendsError && (
+                    <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg text-xs border border-red-200">
+                      {trendsError}
+                    </div>
+                  )}
                   {trendsResults.length > 0 && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mt-4">
                       {trendsResults.map((item, i) => (
