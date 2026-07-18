@@ -103,7 +103,10 @@ function configureGit() {
 function pushToGitHub(niche: string) {
   try {
     console.log("[Git] Committing and pushing autonomous batch for niche:", niche);
-    execSync("git add products/ archive_store.json queue_store.json", { stdio: "inherit" });
+    const filesToAdd = ["products/", "archive_store.json", "queue_store.json"].filter(f => fs.existsSync(f));
+    if (filesToAdd.length > 0) {
+      execSync(`git add ${filesToAdd.join(" ")}`, { stdio: "inherit" });
+    }
     try {
       execSync(`git commit -m "Autonomous hourly product update: ${niche}"`, { stdio: "inherit" });
     } catch (commitErr: any) {
@@ -163,7 +166,11 @@ async function runAutonomousWorkflow() {
     const baseBrainstormModels = [
       "gemini-3.5-flash",
       "gemini-3.1-flash-lite",
-      "gemini-3.1-pro-preview"
+      "gemini-3.1-pro-preview",
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro",
+      "gemini-1.5-flash-8b"
     ];
     const brainstormModels = getOrderedModels(baseBrainstormModels);
 
@@ -401,7 +408,11 @@ Please output the generated product content and its sales listings in the reques
   const baseModelsToTry = [
     "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview"
+    "gemini-3.1-pro-preview",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash-8b"
   ];
   const modelsToTry = getOrderedModels(baseModelsToTry);
   let lastError: any = null;
@@ -710,7 +721,11 @@ app.get("/api/trending-niches", async (req, res) => {
   const searchModels = getOrderedModels([
     "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview"
+    "gemini-3.1-pro-preview",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash-8b"
   ]);
 
   let lastError: any = null;
