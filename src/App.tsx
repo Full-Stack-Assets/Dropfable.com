@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { auth, signInWithGoogle, logout } from "./firebase";
 import { useAuthState } from "react-firebase-hooks/auth";
+import { trackEvent } from "./analytics";
 
 export default function App() {
   const [user, loadingAuth] = useAuthState(auth);
@@ -165,6 +166,7 @@ export default function App() {
     setError(null);
     setLoading(true);
     setBatchResults([]);
+    trackEvent("tool_start", { tool: "asset_manufacturer", product: selectedProduct.id, batch_size: nichesToProcess.length });
 
     try {
       const newResults: ManufactureResult[] = [];
@@ -194,8 +196,10 @@ export default function App() {
         const updatedArchive = [...archivedItems, result];
         saveArchiveState(updatedArchive);
       }
+      trackEvent("tool_complete", { tool: "asset_manufacturer", product: selectedProduct.id, batch_size: newResults.length });
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during synthesis.");
+      trackEvent("tool_error", { tool: "asset_manufacturer", product: selectedProduct.id });
     } finally {
       setLoading(false);
     }

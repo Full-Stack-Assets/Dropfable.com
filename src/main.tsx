@@ -3,6 +3,9 @@ import {createRoot} from 'react-dom/client';
 import './api-base';
 import App from './App.tsx';
 import './index.css';
+import { initializeAnalytics } from './analytics';
+
+initializeAnalytics();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
