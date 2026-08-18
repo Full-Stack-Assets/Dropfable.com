@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+server.generated.cjs
+archive_store.json
+queue_store.json
+products/
