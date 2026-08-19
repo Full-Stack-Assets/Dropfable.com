@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 
 interface ArchiveStatsProps {
@@ -15,13 +15,11 @@ export function ArchiveStats({ items }: ArchiveStatsProps) {
     }
 
     // Calculate stats
-    let totalWords = 0;
     const complexityCounts: Record<string, number> = { Beginner: 0, Advanced: 0, Expert: 0 };
 
     items.forEach(item => {
       const text = item.productContent || '';
       const words = text.split(/\s+/).filter((w: string) => w.length > 0).length;
-      totalWords += words;
 
       let complexity = "Beginner";
       const sample = text.substring(0, 2000).toLowerCase();
@@ -32,8 +30,6 @@ export function ArchiveStats({ items }: ArchiveStatsProps) {
       }
       complexityCounts[complexity] = (complexityCounts[complexity] || 0) + 1;
     });
-
-    const readingTime = Math.ceil(totalWords / 200);
 
     // D3 Chart
     const width = 300;

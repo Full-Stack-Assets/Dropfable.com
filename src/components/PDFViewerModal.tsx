@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { jsPDF } from 'jspdf';
-import { X, Download } from 'lucide-react';
+import { useEffect, useRef, useState } from "react";
+import { X, Download } from "lucide-react";
+import { ManufactureResult } from "../types";
+import { buildProductPdf } from "../lib/export";
 
 interface PDFViewerModalProps {
-  item: any;
+  item: ManufactureResult;
   watermarkText: string;
   onClose: () => void;
   onDownload: () => void;
@@ -15,63 +16,14 @@ export function PDFViewerModal({ item, watermarkText, onClose, onDownload }: PDF
 
   useEffect(() => {
     if (!item) return;
-
-    const generatePdf = async () => {
-      setLoading(true);
-      const doc = new jsPDF();
-      
-      const addFooter = () => {
-        doc.setFontSize(10);
-        doc.setTextColor(150);
-        const footerText = watermarkText.trim() ? `Manufactured by DropKit • ${watermarkText}` : "Manufactured by DropKit Digital Factory";
-        doc.text(footerText, 105, 285, { align: "center" });
-        doc.setTextColor(0);
-        doc.setFontSize(11);
-      };
-
-      // Title Page
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(24);
-      
-      const titleLines = doc.splitTextToSize(item.productTitle || '', 180);
-      doc.text(titleLines, 105, 100, { align: "center" });
-      
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(14);
-      doc.text(`Target Audience: ${item.originalNiche || "General"}`, 105, 130 + (titleLines.length * 10), { align: "center" });
-
-      addFooter();
-
-      // Content Pages
-      doc.addPage();
-      doc.setTextColor(0);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(11);
-      addFooter();
-      
-      const textLines = doc.splitTextToSize(item.productContent || '', 180);
-      
-      let y = 20;
-      for (let i = 0; i < textLines.length; i++) {
-        if (y > 275) {
-          doc.addPage();
-          addFooter();
-          y = 20;
-        }
-        doc.text(textLines[i], 15, y);
-        y += 6;
-      }
-
-      const pdfBlob = doc.output('blob');
-      const pdfUrl = URL.createObjectURL(pdfBlob);
-
-      if (iframeRef.current) {
-        iframeRef.current.src = pdfUrl;
-      }
-      setLoading(false);
-    };
-
-    generatePdf();
+    setLoading(true);
+    const doc = buildProductPdf(item, watermarkText);
+    const pdfUrl = URL.createObjectURL(doc.output("blob"));
+    if (iframeRef.current) {
+      iframeRef.current.src = pdfUrl;
+    }
+    setLoading(false);
+    return () => URL.revokeObjectURL(pdfUrl);
   }, [item, watermarkText]);
 
   return (

@@ -1,15 +1,43 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
-import dotenv from "dotenv";
+import os from "os";
+import fs from "fs";
+import { execSync } from "child_process";
 import { GoogleGenAI, Type } from "@google/genai";
-import { createServer as createViteServer } from "vite";
-
-dotenv.config();
+import { BILLING_ENABLED } from "./billing";
+import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const AUTONOMOUS_ENABLED = process.env.AUTONOMOUS_ENABLED === "true";
+const AUTONOMOUS_GIT_PUSH = process.env.AUTONOMOUS_GIT_PUSH === "true";
+const ETSY_AI_DISCLOSURE =
+  "This product was created with AI assistance under the creative direction of the seller. On Etsy, list it as Designed by the seller (not handmade) and keep this disclosure in the description.";
+const ETSY_PROMPT_PACK_NOTICE =
+  "Not for Etsy — Etsy prohibits selling AI prompt bundles. List this pack on Gumroad or another creator storefront only.";
 
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "https://dropfable.com,https://www.dropfable.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Expose-Headers", "X-DropKit-Quota-Remaining, X-DropKit-Quota-Limit");
+  }
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
+
+registerBillingWebhook(app);
 app.use(express.json({ limit: "15mb" }));
+registerBillingRoutes(app);
 
 // Initialize the GoogleGenAI client on the server
 // API key is fetched from process.env.GEMINI_API_KEY, which is supplied by AI Studio
@@ -42,9 +70,6 @@ const labelsMap: Record<string, string> = {
   swipe: "Swipe File"
 };
 
-import fs from "fs";
-import { execSync } from "child_process";
-
 // Model health tracking to dynamically deprioritize overloaded/503/429 models temporarily
 const modelCooldowns: Record<string, number> = {};
 
@@ -60,7 +85,29 @@ function markModelFailure(modelName: string, minutes = 5) {
   console.log(`[ModelTracker] Demoting ${modelName} for ${minutes} minutes due to a transient/overload occurrence.`);
 }
 
-const ARCHIVE_FILE = path.join(process.cwd(), "archive_store.json");
+const RL_WINDOW_MS = 60_000;
+const RL_MAX = Number(process.env.RATE_LIMIT_PER_MIN || 20);
+const rlHits = new Map<string, number[]>();
+function rateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const fwd = req.headers["x-forwarded-for"];
+  const ip = (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const hits = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
+  if (hits.length >= RL_MAX) {
+    return res.status(429).json({ error: "Too many requests — please wait a minute and try again." });
+  }
+  hits.push(now);
+  rlHits.set(ip, hits);
+  if (rlHits.size > 1000) {
+    for (const [key, times] of rlHits) {
+      if (times.every((t) => now - t >= RL_WINDOW_MS)) rlHits.delete(key);
+    }
+  }
+  next();
+}
+
+const DATA_DIR = process.env.VERCEL ? os.tmpdir() : process.cwd();
+const ARCHIVE_FILE = path.join(DATA_DIR, "archive_store.json");
 
 function loadArchive(): any[] {
   try {
@@ -101,6 +148,10 @@ function configureGit() {
 
 // Push to GitHub helper
 function pushToGitHub(niche: string) {
+  if (!AUTONOMOUS_GIT_PUSH) {
+    console.log("[Git] Push skipped (AUTONOMOUS_GIT_PUSH is not true).");
+    return;
+  }
   try {
     console.log("[Git] Committing and pushing autonomous batch for niche:", niche);
     const filesToAdd = ["products/", "archive_store.json", "queue_store.json"].filter(f => fs.existsSync(f));
@@ -140,6 +191,12 @@ const autonomousState = {
 
 // Autonomous scheduled workflow
 async function runAutonomousWorkflow() {
+  if (!AUTONOMOUS_ENABLED) {
+    console.log("[Autonomous] Disabled (set AUTONOMOUS_ENABLED=true to enable).");
+    autonomousState.status = "idle";
+    autonomousState.error = "Autonomous generation is disabled.";
+    return;
+  }
   if (autonomousState.isRunning) {
     console.log("[Autonomous] Workflow already running, skipping.");
     return;
@@ -324,13 +381,12 @@ ${result.gumroadBlurb}
   }
 }
 
-// Scheduled interval: Hourly (every 60 minutes)
-setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
-
-// Run after a short delay on server boot
-setTimeout(() => {
-  runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
-}, 15000);
+if (AUTONOMOUS_ENABLED && !process.env.VERCEL) {
+  setInterval(runAutonomousWorkflow, 60 * 60 * 1000);
+  setTimeout(() => {
+    runAutonomousWorkflow().catch(err => console.error("[Autonomous] Startup autonomous execution failed:", err));
+  }, 15000);
+}
 
 interface Task {
   id: string;
@@ -347,7 +403,7 @@ interface Task {
   completedAt?: string;
 }
 
-const DB_FILE = path.join(process.cwd(), "queue_store.json");
+const DB_FILE = path.join(DATA_DIR, "queue_store.json");
 
 function loadQueue(): Task[] {
   try {
@@ -384,26 +440,48 @@ async function manufactureProduct(productId: string, niche: string, angle?: stri
 
   const spec = specMap[productId];
   const productName = labelsMap[productId];
+  const openaiKey = process.env.OPENAI_API_KEY;
 
-  if (!geminiApiKey) {
+  if (!geminiApiKey && !openaiKey) {
     throw new Error("GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets.");
   }
 
-  const systemInstruction = 
+  const etsyEligible = productId !== "prompts";
+  const systemInstruction =
     "You are a master digital product engineer and elite copywriter. " +
     "Your goal is to generate exceptionally detailed, highly professional, completely filled digital products " +
     "and the exact optimized sales copy of the product to sell on platforms like Gumroad and Etsy." +
     "\n\nCRITICAL SPEC: Generate absolute FULL content, not summary outlines or instructions on what to write. " +
     "If the specification asks for 30 daily pages or 50 prompts, write out detailed content for them. " +
-    "Keep the tone encouraging, high-value, premium, and actionable.";
+    "Keep the tone encouraging, high-value, premium, and actionable. " +
+    `Always append this exact disclosure to listingDescription: "${ETSY_AI_DISCLOSURE}" ` +
+    (etsyEligible
+      ? "This product may be listed on Etsy with Designed-by-seller attribution."
+      : `Do not produce an Etsy listing for prompt bundles. Set etsyTitle to "${ETSY_PROMPT_PACK_NOTICE}" and etsyTags to an empty array.`);
 
   const promptText = `Please manufacture a premium quality digital product of type: "${productName}".
 Specification of the product: ${spec}
 Niche/Audience: ${niche}
 ${angle ? `Specific angle / flavor requested: ${angle}` : ""}
 ${language && language !== 'English' ? `CRITICAL: You MUST translate and output ALL generated content, including the product content, titles, and sales copy, exactly into the following language: ${language}` : ""}
+Etsy eligible: ${etsyEligible ? "yes" : "no — Gumroad only"}
 
 Please output the generated product content and its sales listings in the requested JSON structure. No placeholders. Ensure high completeness.`;
+
+  function finalizeResult(parsed: any) {
+    const listingDescription = String(parsed.listingDescription || "");
+    const withDisclosure = listingDescription.includes(ETSY_AI_DISCLOSURE)
+      ? listingDescription
+      : `${listingDescription.trim()}\n\n${ETSY_AI_DISCLOSURE}`;
+    return {
+      ...parsed,
+      productId,
+      etsyEligible,
+      listingDescription: etsyEligible ? withDisclosure : listingDescription,
+      etsyTitle: etsyEligible ? parsed.etsyTitle : ETSY_PROMPT_PACK_NOTICE,
+      etsyTags: etsyEligible ? parsed.etsyTags || [] : [],
+    };
+  }
 
   const baseModelsToTry = [
     "gemini-3.5-flash",
@@ -481,7 +559,7 @@ Please output the generated product content and its sales listings in the reques
           throw new Error("Empty response received from Gemini model.");
         }
 
-        return JSON.parse(responseText);
+        return finalizeResult(JSON.parse(responseText));
 
       } catch (error: any) {
         lastError = error;
@@ -514,7 +592,42 @@ Please output the generated product content and its sales listings in the reques
       }
     }
   }
-  
+
+  if (openaiKey) {
+    try {
+      console.log("[Generator] Falling back to OpenAI...");
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemInstruction + " Respond with JSON only." },
+            {
+              role: "user",
+              content:
+                promptText +
+                "\n\nReturn JSON with keys: productTitle, productContent, etsyTitle, priceRecommendationValue, listingDescription, etsyTags (array of strings), gumroadBlurb.",
+            },
+          ],
+        }),
+      });
+      const payload: any = await res.json();
+      const text = payload?.choices?.[0]?.message?.content;
+      if (!res.ok || !text) {
+        throw new Error(payload?.error?.message || `OpenAI HTTP ${res.status}`);
+      }
+      return finalizeResult(JSON.parse(text));
+    } catch (err: any) {
+      lastError = err;
+      console.warn("[Generator] OpenAI fallback failed:", err.message);
+    }
+  }
+
   const errorMessage = lastError?.message || "";
   if (errorMessage.includes("quota") || lastError?.status === 429 || errorMessage.includes("429")) {
     throw new Error("You have exceeded your Gemini API quota. Please check your Google AI Studio plan and billing details.");
@@ -569,8 +682,19 @@ async function processQueueRunner() {
   }
 }
 
+app.get("/api/health", (_req, res) => {
+  return res.json({
+    ok: true,
+    service: "dropkit",
+    hasGeminiKey: Boolean(geminiApiKey),
+    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    billingEnabled: BILLING_ENABLED,
+    autonomousEnabled: AUTONOMOUS_ENABLED,
+  });
+});
+
 // 1. Instant/Synchronous Manufacture Endpoint
-app.post("/api/manufacture", async (req, res) => {
+app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
   try {
     const { productId, niche, angle, language } = req.body;
     const data = await manufactureProduct(productId, niche, angle, language);
@@ -711,7 +835,7 @@ app.post("/api/archive/remove", (req, res) => {
 });
 
 // Trending Niches using Google Search integration via Gemini
-app.get("/api/trending-niches", async (req, res) => {
+app.get("/api/trending-niches", rateLimit, requireQuota(), async (req, res) => {
   if (!geminiApiKey) {
     return res.status(400).json({ error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." });
   }
@@ -790,7 +914,7 @@ app.get("/api/trending-niches", async (req, res) => {
 });
 
 // Semantic Product Type Detection
-app.post("/api/detect-format", async (req, res) => {
+app.post("/api/detect-format", rateLimit, requireQuota(), async (req, res) => {
   if (!geminiApiKey) {
     return res.status(400).json({ error: "GEMINI_API_KEY is not defined." });
   }
@@ -829,7 +953,7 @@ app.post("/api/detect-format", async (req, res) => {
 });
 
 // Semantic Tags Suggestion
-app.post("/api/suggest-tags", async (req, res) => {
+app.post("/api/suggest-tags", rateLimit, async (req, res) => {
   if (!geminiApiKey) return res.status(400).json({ error: "No API key" });
   const { query } = req.body;
   if (!query) return res.json({ tags: [] });
@@ -872,25 +996,59 @@ app.get("/api/autonomous-status", (req, res) => {
   });
 });
 
+app.post("/api/image/generate", rateLimit, requireQuota(), async (req, res) => {
+  try {
+    const { productTitle, niche } = req.body;
+    if (!productTitle) {
+      return res.status(400).json({ error: "Product title required for cover art generation." });
+    }
+    if (!geminiApiKey) {
+      return res.status(400).json({ error: "GEMINI_API_KEY is not defined." });
+    }
+    const prompt = `A clean, elegant, premium, modern graphical cover for a digital product targeting ${niche || "creators"}. The product is named: "${productTitle}". Best suited for a digital download product card, minimal style.`;
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: { parts: [{ text: prompt }] },
+      config: { imageConfig: { aspectRatio: "4:3" } },
+    });
+    let imageUrl: string | null = null;
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        const mimeType = part.inlineData.mimeType || "image/jpeg";
+        imageUrl = `data:${mimeType};base64,${part.inlineData.data}`;
+        break;
+      }
+    }
+    if (!imageUrl) throw new Error("No image generated");
+    return res.json({ imageUrl });
+  } catch (error: any) {
+    console.error("Image Generation Error:", error);
+    return res.status(500).json({ error: error.message || "Failed to generate image." });
+  }
+});
+
 app.post("/api/autonomous-trigger", (req, res) => {
+  if (!AUTONOMOUS_ENABLED) {
+    return res.status(400).json({ error: "Autonomous generation is disabled. Set AUTONOMOUS_ENABLED=true to enable." });
+  }
   if (!geminiApiKey) {
     return res.status(400).json({ error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." });
   }
   if (autonomousState.isRunning) {
     return res.status(400).json({ error: "Autonomous background generator is already actively running." });
   }
-  // Run asynchronously in background
   runAutonomousWorkflow().catch(err => console.error("[Autonomous] Triggered workflow failure:", err));
   return res.json({ success: true, message: "Autonomous hourly product batch generator triggered." });
 });
 
-// Auto-run processing on server startup if any pending items exist
-processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
+if (!process.env.VERCEL) {
+  processQueueRunner().catch(err => console.error("[Queue] Startup runner failure:", err));
+}
 
-
-// Setup Vite Dev Middleware / Static files serving
 async function mountViteMiddleware() {
   if (process.env.NODE_ENV !== "production") {
+    const viteSpecifier = "vite";
+    const { createServer: createViteServer } = await import(viteSpecifier);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -909,4 +1067,8 @@ async function mountViteMiddleware() {
   });
 }
 
-mountViteMiddleware();
+if (!process.env.VERCEL) {
+  mountViteMiddleware();
+}
+
+export default app;
