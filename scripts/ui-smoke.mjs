@@ -78,6 +78,23 @@ async function main() {
     }, FAKE_ARCHIVE);
 
     await page.goto(`http://localhost:${port}/`, { waitUntil: "networkidle" });
+
+    try {
+      await page.setViewportSize({ width: 311, height: 844 });
+      await page.getByPlaceholder("Explore a market...").fill("Creator economy");
+      await page.getByRole("button", { name: "Scan" }).click();
+      await page.getByText("Creator Economy Beginners").waitFor({ timeout: 10000 });
+      await page.getByLabel("Primary Niche *").fill("Independent consultants");
+      await page.getByRole("button", { name: "Manufacture Assets" }).click();
+      await page.getByText("Generation Complete").waitFor({ timeout: 10000 });
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+      if (overflow) throw new Error("page has horizontal overflow at 311px");
+      console.log("PASS mobile offline manufacture flow");
+    } catch (e) {
+      console.log(`FAIL mobile offline manufacture flow -> ${e.message}`);
+      failed++;
+    }
+
     await page.getByText(/Archive \(/).first().click();
     await page.getByText("UI Smoke Test Product").first().waitFor({ timeout: 10000 });
 
