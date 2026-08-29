@@ -11,6 +11,8 @@ import { useAuthState } from "react-firebase-hooks/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { trackEvent } from "./analytics";
 import { parseJsonResponse } from "./lib/http";
+import { hasRemoteApi } from "./api-base";
+import { detectLocalFormat, localTrendIdeas, manufactureLocally, suggestNiches } from "./lib/localFactory";
 import { ARCHIVE_KEY, upsertArchiveItem } from "./lib/archive";
 import { authHeaders, fetchAccount, fetchBillingConfig, type AccountInfo, type BillingConfig } from "./lib/billingClient";
 
@@ -102,6 +104,10 @@ export default function App() {
     }
 
     const timeoutId = setTimeout(async () => {
+      if (!hasRemoteApi) {
+        setSuggestions(suggestNiches(niche));
+        return;
+      }
       try {
         const res = await fetch("/api/suggest-tags", {
           method: "POST",
@@ -114,12 +120,14 @@ export default function App() {
         }
       } catch (err) {
         console.error(err);
+        setSuggestions(suggestNiches(niche));
       }
     }, 500);
     return () => clearTimeout(timeoutId);
   }, [niche, isBatchMode, view]);
 
   useEffect(() => {
+    if (!hasRemoteApi) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -146,13 +154,18 @@ export default function App() {
     setTrendsLoading(true);
     setTrendsError(null);
     try {
+      if (!hasRemoteApi) {
+        setTrendsResults(localTrendIdeas(trendsSearchQuery));
+        return;
+      }
       const qParam = encodeURIComponent(trendsSearchQuery.trim() || "currently trending digital product niches 2026");
       const res = await fetch(`/api/trending-niches?q=${qParam}`, { headers: authHeaders() });
       const data = await parseJsonResponse(res);
       if (!res.ok) throw new Error(data.error || "Failed to fetch live trends.");
       setTrendsResults(data.trends || []);
     } catch (err: any) {
-      setTrendsError(err.message || "An error occurred while fetching trends.");
+      setTrendsResults(localTrendIdeas(trendsSearchQuery));
+      setTrendsError("Live search is temporarily unavailable, so these are demand-research starters rather than live trend claims.");
     } finally {
       setTrendsLoading(false);
     }
@@ -166,6 +179,12 @@ export default function App() {
     setIsDetecting(true);
     setError(null);
     try {
+      if (!hasRemoteApi) {
+        const format = detectLocalFormat(niche);
+        const match = PRODUCTS.find((p) => p.id === format);
+        if (match) setSelectedProduct(match);
+        return;
+      }
       const res = await fetch("/api/detect-format", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -178,6 +197,9 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
+      const format = detectLocalFormat(niche);
+      const match = PRODUCTS.find((p) => p.id === format);
+      if (match) setSelectedProduct(match);
     } finally {
       setIsDetecting(false);
     }
@@ -206,6 +228,14 @@ export default function App() {
 
     for (const currentNiche of niches) {
       try {
+        if (!hasRemoteApi) {
+          const result = manufactureLocally(selectedProduct, currentNiche, angle, language);
+          newResults.push(result);
+          setBatchResults([...newResults]);
+          archive = upsertArchiveItem(archive, result);
+          await saveArchiveState(archive);
+          continue;
+        }
         const response = await fetch("/api/manufacture", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -224,7 +254,15 @@ export default function App() {
         archive = upsertArchiveItem(archive, result);
         await saveArchiveState(archive);
       } catch (err: any) {
-        failures.push(`${currentNiche}: ${err.message || "failed"}`);
+        try {
+          const result = manufactureLocally(selectedProduct, currentNiche, angle, language);
+          newResults.push(result);
+          setBatchResults([...newResults]);
+          archive = upsertArchiveItem(archive, result);
+          await saveArchiveState(archive);
+        } catch {
+          failures.push(`${currentNiche}: ${err.message || "failed"}`);
+        }
       }
     }
 
@@ -239,6 +277,10 @@ export default function App() {
   };
 
   const enqueueBatch = async () => {
+    if (!hasRemoteApi) {
+      setError("Background queueing needs the hosted AI service. Use Manufacture Assets for instant browser generation.");
+      return;
+    }
     const niches = nichesToProcess();
     if (niches.length === 0) {
       setError("Please insert a target audience parameter to proceed.");
@@ -284,6 +326,7 @@ export default function App() {
       <Header
         archiveView={view === "archive"}
         queueView={view === "queue"}
+        showQueue={hasRemoteApi}
         pricingView={view === "pricing"}
         showPricing={!!billingConfig?.enabled}
         pendingCount={pendingCount}
@@ -298,7 +341,7 @@ export default function App() {
         onSignOut={() => logout()}
       />
 
-      <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-12">
+      <main className="flex-1 w-full max-w-[1200px] mx-auto px-4 sm:px-6 py-8 sm:py-12">
         {view === "archive" ? (
           <ArchiveView
             archivedItems={archivedItems}
@@ -316,18 +359,23 @@ export default function App() {
           <Billing config={billingConfig} account={billingAccount} onAccountChange={setBillingAccount} />
         ) : (
           <div className="max-w-4xl mx-auto">
-            <div className="text-center mb-16">
+            <div className="text-center mb-10 sm:mb-16">
               <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight text-gray-900 mb-4">
                 Digital Assets on Demand
               </h2>
               <p className="text-lg text-gray-500 font-light max-w-2xl mx-auto">
                 Generate a listable planner, guide, or checklist — complete with Etsy/Gumroad copy — in one download.
               </p>
+              {!hasRemoteApi && (
+                <p className="mt-4 text-xs text-emerald-800 bg-emerald-50 border border-emerald-100 rounded-full px-4 py-2 inline-flex">
+                  Instant browser factory active — no account or server connection required.
+                </p>
+              )}
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mb-12">
-              <div className="p-8 border-b border-gray-100">
-                <div className="flex items-center justify-between mb-6">
+              <div className="p-5 sm:p-8 border-b border-gray-100">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                   <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-900">1. Select Format</h3>
                   <button
                     onClick={handleAutoDetect}
@@ -361,8 +409,8 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="p-8">
-                <div className="flex items-center justify-between mb-6">
+              <div className="p-5 sm:p-8">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                   <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-900">2. Target Audience</h3>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Batch Mode</span>
@@ -447,7 +495,7 @@ export default function App() {
                       value={language}
                       onChange={(e) => setLanguage(e.target.value)}
                     >
-                      {LANGUAGES.map((lang) => (
+                      {(hasRemoteApi ? LANGUAGES : ["English"]).map((lang) => (
                         <option key={lang} value={lang}>{lang}</option>
                       ))}
                     </select>
@@ -463,29 +511,32 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="mt-8 p-6 bg-emerald-50 rounded-xl border border-emerald-100">
+                <div className="mt-8 p-4 sm:p-6 bg-emerald-50 rounded-xl border border-emerald-100">
                   <div className="flex items-center gap-2 mb-4">
                     <Globe className="w-5 h-5 text-emerald-600" />
-                    <h4 className="font-semibold text-emerald-900">Google Search Trend Radar</h4>
+                    <h4 className="font-semibold text-emerald-900">{hasRemoteApi ? "Google Search Trend Radar" : "Demand Idea Radar"}</h4>
                   </div>
-                  <form className="flex gap-3 mb-4" onSubmit={handleSearchTrends}>
+                  <p className="text-xs text-emerald-800/75 mb-4">
+                    {hasRemoteApi ? "Scan live search signals for a focused market." : "Generate focused demand-research starters, then validate them before publishing."}
+                  </p>
+                  <form className="flex flex-col sm:flex-row gap-3 mb-4" onSubmit={handleSearchTrends}>
                     <input
                       type="text"
-                      className="flex-1 bg-white border border-emerald-200 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
-                      placeholder="Search live trends..."
+                      className="w-full min-w-0 flex-1 bg-white border border-emerald-200 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                      placeholder={hasRemoteApi ? "Search live trends..." : "Explore a market..."}
                       value={trendsSearchQuery}
                       onChange={(e) => setTrendsSearchQuery(e.target.value)}
                     />
                     <button
                       type="submit"
                       disabled={trendsLoading}
-                      className="px-6 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+                      className="w-full sm:w-auto shrink-0 px-6 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
                     >
                       {trendsLoading ? "Scanning..." : "Scan"}
                     </button>
                   </form>
                   {trendsError && (
-                    <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-lg text-xs border border-red-200">
+                    <div className={`mt-4 p-3 rounded-lg text-xs border ${trendsResults.length ? "bg-amber-50 text-amber-800 border-amber-200" : "bg-red-50 text-red-700 border-red-200"}`}>
                       {trendsError}
                     </div>
                   )}
@@ -503,14 +554,16 @@ export default function App() {
                 </div>
 
                 <div className="mt-8 flex flex-col sm:flex-row justify-end gap-3">
-                  <button
-                    onClick={enqueueBatch}
-                    disabled={queueing || !niche}
-                    className="flex items-center justify-center gap-2 px-6 py-4 border border-gray-300 text-gray-800 rounded-xl font-medium hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    {queueing ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
-                    Queue instead
-                  </button>
+                  {hasRemoteApi && (
+                    <button
+                      onClick={enqueueBatch}
+                      disabled={queueing || !niche}
+                      className="flex items-center justify-center gap-2 px-6 py-4 border border-gray-300 text-gray-800 rounded-xl font-medium hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {queueing ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+                      Queue instead
+                    </button>
+                  )}
                   <button
                     onClick={triggerSubmit}
                     disabled={loading || !niche}

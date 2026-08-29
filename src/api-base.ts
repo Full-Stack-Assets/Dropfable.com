@@ -1,4 +1,19 @@
-const apiBase = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+function normalizeApiBase(value: string | undefined): string {
+  const candidate = (value ?? '').trim().replace(/\/+$/, '');
+  if (!candidate) return '';
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    console.error('VITE_API_BASE_URL is invalid; using the in-browser factory.');
+    return '';
+  }
+}
+
+export const apiBase = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
+export const hasRemoteApi = import.meta.env.DEV || Boolean(apiBase);
 
 if (apiBase && typeof window !== 'undefined') {
   const nativeFetch = window.fetch.bind(window);
