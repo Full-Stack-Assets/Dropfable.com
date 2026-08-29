@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js server.generated.cjs",
     "lint": "tsc --noEmit",
     "bundle:server": "esbuild server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=server.generated.cjs",
-    "test": "npm run bundle:server && node scripts/smoke.cjs && node scripts/billing-smoke.cjs",
+    "test": "npm run test:local && npm run bundle:server && node scripts/smoke.cjs && node scripts/billing-smoke.cjs",
+    "test:local": "node --import tsx scripts/local-factory-smoke.ts",
     "test:ui": "node scripts/ui-smoke.mjs"
   },
   "dependencies": {
