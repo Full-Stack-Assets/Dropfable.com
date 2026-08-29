@@ -5,6 +5,7 @@ import { NICHE_TREND_DATA } from "../constants";
 interface HeaderProps {
   archiveView: boolean;
   queueView: boolean;
+  showQueue: boolean;
   pricingView?: boolean;
   showPricing?: boolean;
   pendingCount: number;
@@ -22,6 +23,7 @@ interface HeaderProps {
 export function Header({
   archiveView,
   queueView,
+  showQueue,
   pricingView,
   showPricing,
   pendingCount,
@@ -37,9 +39,9 @@ export function Header({
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200">
-      <div className="max-w-[1200px] mx-auto px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-6">
-          <h1 className="text-sm font-bold tracking-tight text-gray-900 flex items-center gap-2">
+      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-6 shrink-0">
+          <h1 className="text-sm font-bold tracking-tight text-gray-900 flex items-center gap-2 whitespace-nowrap">
             <Sparkles className="w-4 h-4 text-emerald-600" />
             DropKit Factory
           </h1>
@@ -56,19 +58,21 @@ export function Header({
           </div>
         </div>
 
-        <nav className="flex flex-wrap items-center justify-end gap-6 text-sm font-medium text-gray-500">
+        <nav className="w-full sm:w-auto flex items-center justify-start sm:justify-end gap-4 sm:gap-6 text-xs sm:text-sm font-medium text-gray-500 overflow-x-auto pb-1 sm:pb-0">
           <button
             onClick={onManufacture}
             className={`transition-colors ${!archiveView && !queueView && !pricingView ? "text-gray-900" : "hover:text-gray-900"}`}
           >
             Manufacture
           </button>
-          <button
-            onClick={onQueue}
-            className={`transition-colors ${queueView ? "text-gray-900" : "hover:text-gray-900"}`}
-          >
-            Queue ({pendingCount})
-          </button>
+          {showQueue && (
+            <button
+              onClick={onQueue}
+              className={`transition-colors ${queueView ? "text-gray-900" : "hover:text-gray-900"}`}
+            >
+              Queue ({pendingCount})
+            </button>
+          )}
           <button
             onClick={onArchive}
             className={`transition-colors ${archiveView ? "text-gray-900" : "hover:text-gray-900"}`}
