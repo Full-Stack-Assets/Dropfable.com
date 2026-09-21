@@ -5,7 +5,7 @@ import os from "os";
 import fs from "fs";
 import { execSync } from "child_process";
 import { GoogleGenAI, Type } from "@google/genai";
-import { BILLING_ENABLED } from "./billing";
+import { BILLING_ENABLED, meter } from "./billing";
 import { registerBillingWebhook, registerBillingRoutes, requireQuota } from "./billing-routes";
 
 const app = express();
@@ -51,6 +51,80 @@ const ai = new GoogleGenAI({
     },
   },
 });
+
+// ── LLM provider abstraction ─────────────────────────────────────────────
+// LLM_PROVIDER=nvidia | gemini | openai. When unset (or "gemini") the original
+// behavior is preserved: gemini-first with an OpenAI fallback. "nvidia" routes
+// manufacture, format detection, and tag suggestions through NVIDIA's
+// OpenAI-compatible endpoint — no Gemini key required in that mode.
+type LlmProvider = "nvidia" | "gemini" | "openai";
+const LLM_PROVIDER: LlmProvider = (() => {
+  const v = (process.env.LLM_PROVIDER || "gemini").toLowerCase();
+  return v === "nvidia" || v === "openai" ? v : "gemini";
+})();
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "moonshotai/kimi-k3";
+const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+// Gemini model IDs verified live 2026-09-20 against published API model lists:
+// gemini-3.5-flash, gemini-3.1-flash-lite, gemini-3.1-pro-preview are live;
+// gemini-3.6-flash and gemini-3.5-flash-lite are the current stable GA tier.
+// gemini-2.0-* and gemini-1.5-* were shut down (404) and are removed so
+// requests never burn through a doomed retry chain.
+const GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+];
+
+interface LlmCallOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+// Generic OpenAI-compatible JSON chat call (used for NVIDIA + OpenAI).
+async function openAiCompatibleJson(opts: {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  label: string;
+  system: string;
+  user: string;
+  call?: LlmCallOptions;
+}): Promise<any> {
+  const resp = await fetch(`${opts.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${opts.apiKey}` },
+    body: JSON.stringify({
+      model: opts.model,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${opts.system} Respond with JSON only.` },
+        { role: "user", content: opts.user },
+      ],
+    }),
+    signal: opts.call?.signal ?? AbortSignal.timeout(opts.call?.timeoutMs ?? 300000),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`${opts.label} HTTP ${resp.status}${txt ? `: ${txt.slice(0, 300)}` : ""}`);
+  }
+  const data: any = await resp.json();
+  const content = (data?.choices?.[0]?.message?.content || "").trim();
+  if (!content) throw new Error(`${opts.label} returned an empty response.`);
+  const jsonStr = content.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    throw new Error(`${opts.label} returned non-JSON output.`);
+  }
+}
 
 const specMap: Record<string, string> = {
   planner: "a premium 30-day planner/workbook: featuring an engaging intro page, a clear 'how-to-use' layout, 30 beautifully detailed daily pages (each with an inspiring daily theme, 2-3 specific reflective prompts or input fields, and a daily actionable microscopic step), a recurring weekly review section (every 7 days, so total of 4 reviews), and a final comprehensive reflection page. Do not hold back, provide the complete content for each of the 30 days.",
@@ -429,7 +503,7 @@ function saveQueue(tasks: Task[]) {
 let taskQueue: Task[] = loadQueue();
 
 // Core content generation utility shared by synchronous manufacture and the background queue
-async function manufactureProduct(productId: string, niche: string, angle?: string, language?: string) {
+async function manufactureProduct(productId: string, niche: string, angle?: string, language?: string, opts?: LlmCallOptions) {
   if (!productId || !specMap[productId]) {
     throw new Error("Invalid product ID selected.");
   }
@@ -440,9 +514,15 @@ async function manufactureProduct(productId: string, niche: string, angle?: stri
 
   const spec = specMap[productId];
   const productName = labelsMap[productId];
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = OPENAI_API_KEY;
 
-  if (!geminiApiKey && !openaiKey) {
+  if (LLM_PROVIDER === "nvidia" && !NVIDIA_API_KEY) {
+    throw new Error("LLM_PROVIDER=nvidia requires NVIDIA_API_KEY to be set.");
+  }
+  if (LLM_PROVIDER === "openai" && !openaiKey) {
+    throw new Error("LLM_PROVIDER=openai requires OPENAI_API_KEY to be set.");
+  }
+  if (LLM_PROVIDER === "gemini" && !geminiApiKey && !openaiKey) {
     throw new Error("GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets.");
   }
 
@@ -483,19 +563,37 @@ Please output the generated product content and its sales listings in the reques
     };
   }
 
-  const baseModelsToTry = [
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash-8b"
-  ];
-  const modelsToTry = getOrderedModels(baseModelsToTry);
+  // Gemini model IDs verified live 2026-09-20 (see GEMINI_MODELS): the three
+  // named IDs are live and gemini-3.6-flash / gemini-3.5-flash-lite are the
+  // current stable GA tier. Shut-down 2.0/1.5 IDs are removed so requests
+  // never burn through a doomed retry chain.
+  const modelsToTry = getOrderedModels(GEMINI_MODELS);
   let lastError: any = null;
 
+  // NVIDIA primary path — no Gemini key required in this mode.
+  if (LLM_PROVIDER === "nvidia") {
+    try {
+      console.log(`[Generator] Requesting content generation from NVIDIA (${NVIDIA_MODEL})...`);
+      const parsed = await openAiCompatibleJson({
+        baseUrl: NVIDIA_BASE_URL,
+        apiKey: NVIDIA_API_KEY as string,
+        model: NVIDIA_MODEL,
+        label: `NVIDIA ${NVIDIA_MODEL}`,
+        system: systemInstruction,
+        user:
+          promptText +
+          "\n\nReturn JSON with keys: productTitle, productContent, etsyTitle, priceRecommendationValue, listingDescription, etsyTags (array of strings), gumroadBlurb.",
+        call: opts,
+      });
+      return finalizeResult(parsed);
+    } catch (err: any) {
+      lastError = err;
+      console.warn("[Generator] NVIDIA generation failed:", err.message);
+    }
+  }
+
   for (const modelName of modelsToTry) {
+    if (LLM_PROVIDER !== "gemini") break; // gemini chain only runs in gemini mode
     let retryCount = 0;
     const maxRetries = 3;
 
@@ -507,6 +605,7 @@ Please output the generated product content and its sales listings in the reques
           contents: promptText,
           config: {
             systemInstruction,
+            abortSignal: opts?.signal,
             responseMimeType: "application/json",
             responseSchema: {
               type: Type.OBJECT,
@@ -593,50 +692,53 @@ Please output the generated product content and its sales listings in the reques
     }
   }
 
+  // OpenAI: primary when LLM_PROVIDER=openai, fallback for gemini/nvidia modes.
   if (openaiKey) {
     try {
-      console.log("[Generator] Falling back to OpenAI...");
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${openaiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: systemInstruction + " Respond with JSON only." },
-            {
-              role: "user",
-              content:
-                promptText +
-                "\n\nReturn JSON with keys: productTitle, productContent, etsyTitle, priceRecommendationValue, listingDescription, etsyTags (array of strings), gumroadBlurb.",
-            },
-          ],
-        }),
+      console.log(
+        LLM_PROVIDER === "openai"
+          ? "[Generator] Requesting content generation from OpenAI..."
+          : "[Generator] Falling back to OpenAI..."
+      );
+      const parsed = await openAiCompatibleJson({
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: openaiKey,
+        model: OPENAI_MODEL,
+        label: `OpenAI ${OPENAI_MODEL}`,
+        system: systemInstruction,
+        user:
+          promptText +
+          "\n\nReturn JSON with keys: productTitle, productContent, etsyTitle, priceRecommendationValue, listingDescription, etsyTags (array of strings), gumroadBlurb.",
+        call: opts,
       });
-      const payload: any = await res.json();
-      const text = payload?.choices?.[0]?.message?.content;
-      if (!res.ok || !text) {
-        throw new Error(payload?.error?.message || `OpenAI HTTP ${res.status}`);
-      }
-      return finalizeResult(JSON.parse(text));
+      return finalizeResult(parsed);
     } catch (err: any) {
       lastError = err;
-      console.warn("[Generator] OpenAI fallback failed:", err.message);
+      console.warn("[Generator] OpenAI generation failed:", err.message);
     }
   }
 
   const errorMessage = lastError?.message || "";
+  const quotaMsg =
+    LLM_PROVIDER === "nvidia"
+      ? "NVIDIA API rate limit or quota exceeded. Check your NVIDIA API key usage and try again shortly."
+      : LLM_PROVIDER === "openai"
+        ? "OpenAI API rate limit or quota exceeded. Check your OpenAI plan and billing."
+        : "You have exceeded your Gemini API quota. Please check your Google AI Studio plan and billing details.";
+  const authMsg =
+    LLM_PROVIDER === "nvidia"
+      ? "The provided NVIDIA_API_KEY is invalid or disabled."
+      : LLM_PROVIDER === "openai"
+        ? "The provided OPENAI_API_KEY is invalid or disabled."
+        : "The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets.";
   if (errorMessage.includes("quota") || lastError?.status === 429 || errorMessage.includes("429")) {
-    throw new Error("You have exceeded your Gemini API quota. Please check your Google AI Studio plan and billing details.");
+    throw new Error(quotaMsg);
   }
   if (errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || lastError?.status === 401 || errorMessage.includes("401")) {
-    throw new Error("The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets.");
+    throw new Error(authMsg);
   }
-  
-  throw lastError;
+
+  throw lastError ?? new Error("All configured LLM providers failed to generate content.");
 }
 
 let isProcessing = false;
@@ -686,8 +788,12 @@ app.get("/api/health", (_req, res) => {
   return res.json({
     ok: true,
     service: "dropkit",
+    llmProvider: LLM_PROVIDER,
+    llmModel: LLM_PROVIDER === "nvidia" ? NVIDIA_MODEL : LLM_PROVIDER === "openai" ? OPENAI_MODEL : "gemini-chain",
     hasGeminiKey: Boolean(geminiApiKey),
-    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    hasNvidiaKey: Boolean(NVIDIA_API_KEY),
+    hasOpenAiKey: Boolean(OPENAI_API_KEY),
+    hasGumroadToken: Boolean(process.env.GUMROAD_ACCESS_TOKEN),
     billingEnabled: BILLING_ENABLED,
     autonomousEnabled: AUTONOMOUS_ENABLED,
   });
@@ -703,6 +809,408 @@ app.post("/api/manufacture", rateLimit, requireQuota(), async (req, res) => {
     console.error("Manufacturing Jammed Error:", error);
     return res.status(500).json({ 
       error: error.message || "The manufacturing factory engine suffered a temporary jam. Please click 'Drop it' again!" 
+    });
+  }
+});
+
+// 1b. Manufacture ALL formats for a niche as a background job with per-format
+// progress + cancel. NOTE: jobs live in process memory only. On Render's free
+// tier the disk is ephemeral and dynos sleep — a restart or redeploy wipes
+// in-flight and finished jobs, so clients must treat a 404 on a jobId as
+// "job lost (server restarted)" and poll promptly.
+type AllFormatStatus = "pending" | "working" | "done" | "error";
+interface AllFormatState {
+  productId: string;
+  name: string;
+  status: AllFormatStatus;
+  error?: string;
+  result?: any;
+}
+interface ManufactureAllJob {
+  id: string;
+  niche: string;
+  angle?: string;
+  language?: string;
+  status: "running" | "completed" | "cancelled";
+  formats: AllFormatState[];
+  createdAt: string;
+  completedAt?: string;
+  cancelled: boolean;
+  abort: AbortController | null;
+}
+
+const MANUFACTURE_ALL_IDS = ["planner", "prompts", "templates", "guide", "checklist", "swipe"];
+const manufactureAllJobs = new Map<string, ManufactureAllJob>();
+
+function pruneManufactureAllJobs() {
+  if (manufactureAllJobs.size <= 50) return;
+  const entries = [...manufactureAllJobs.entries()].sort((a, b) =>
+    a[1].createdAt.localeCompare(b[1].createdAt)
+  );
+  for (const [id, job] of entries) {
+    if (manufactureAllJobs.size <= 50) break;
+    if (job.status !== "running") manufactureAllJobs.delete(id);
+  }
+}
+
+function publicAllJob(job: ManufactureAllJob) {
+  return {
+    jobId: job.id,
+    status: job.status,
+    niche: job.niche,
+    progress: {
+      done: job.formats.filter((f) => f.status === "done" || f.status === "error").length,
+      total: job.formats.length,
+    },
+    formats: job.formats.map((f) => ({
+      productId: f.productId,
+      name: f.name,
+      status: f.status,
+      error: f.error,
+    })),
+    results: job.formats
+      .filter((f) => f.status === "done" && f.result)
+      .map((f) => ({ ...f.result, productId: f.productId, originalNiche: job.niche })),
+    createdAt: job.createdAt,
+    completedAt: job.completedAt,
+  };
+}
+
+async function runManufactureAllJob(job: ManufactureAllJob) {
+  for (const f of job.formats) {
+    if (job.cancelled) break;
+    f.status = "working";
+    const controller = new AbortController();
+    job.abort = controller;
+    const timeout = setTimeout(() => controller.abort(), 6 * 60 * 1000); // per-format ceiling
+    try {
+      console.log(`[manufacture-all] job ${job.id}: generating ${f.productId}...`);
+      const data = await manufactureProduct(f.productId, job.niche, job.angle, job.language, {
+        signal: controller.signal,
+      });
+      if (job.cancelled) {
+        f.status = "pending";
+        break;
+      }
+      f.result = data;
+      f.status = "done";
+      console.log(`[manufacture-all] job ${job.id}: ${f.productId} done.`);
+    } catch (err: any) {
+      if (job.cancelled || controller.signal.aborted) {
+        f.status = "pending";
+        break;
+      }
+      console.warn(`[manufacture-all] job ${job.id}: ${f.productId} failed:`, err.message || err);
+      f.status = "error";
+      f.error = err.message || `Failed to generate ${f.productId}.`;
+    } finally {
+      clearTimeout(timeout);
+      if (job.abort === controller) job.abort = null;
+    }
+  }
+  job.status = job.cancelled ? "cancelled" : "completed";
+  job.completedAt = new Date().toISOString();
+}
+
+function apiKeyFromReq(req: express.Request): string | undefined {
+  const header = req.headers["x-api-key"];
+  const fromHeader = Array.isArray(header) ? header[0] : header;
+  return (fromHeader || (req.body as any)?.apiKey || (req.query as any)?.key) as string | undefined;
+}
+
+// Quota gate that consumes N units (one per generated format). No-op unless billing is on.
+async function consumeQuotaUnits(
+  req: express.Request,
+  res: express.Response,
+  units: number
+): Promise<boolean> {
+  if (!BILLING_ENABLED) return true;
+  const key = apiKeyFromReq(req);
+  for (let i = 0; i < units; i++) {
+    const result = await meter(key);
+    if (!result.ok) {
+      const code = result.reason === "invalid_key" ? 401 : 402;
+      const error =
+        result.reason === "invalid_key"
+          ? "Missing or invalid API key. Create a free key on the Pricing page and send it as the x-api-key header."
+          : "Monthly quota reached. Upgrade your plan on the Pricing page to keep generating.";
+      res.status(code).json({ error, reason: result.reason, limit: result.limit, plan: result.plan });
+      return false;
+    }
+    if (typeof result.remaining === "number") {
+      res.setHeader("X-DropKit-Quota-Remaining", String(result.remaining));
+      res.setHeader("X-DropKit-Quota-Limit", String(result.limit ?? ""));
+    }
+  }
+  return true;
+}
+
+app.post("/api/manufacture-all", rateLimit, async (req, res) => {
+  const { niche, angle, language } = req.body;
+  if (!niche || !String(niche).trim()) {
+    return res.status(400).json({ error: "Niche/Audience is required." });
+  }
+  // All-format runs generate 6 products: consume 6 quota units, not 1.
+  if (!(await consumeQuotaUnits(req, res, MANUFACTURE_ALL_IDS.length))) return;
+
+  const job: ManufactureAllJob = {
+    id: "all_" + Math.random().toString(36).substring(2, 10) + "_" + Date.now(),
+    niche: String(niche).trim(),
+    angle: typeof angle === "string" && angle.trim() ? angle.trim() : undefined,
+    language: language || "English",
+    status: "running",
+    formats: MANUFACTURE_ALL_IDS.map((pid) => ({
+      productId: pid,
+      name: labelsMap[pid],
+      status: "pending" as AllFormatStatus,
+    })),
+    createdAt: new Date().toISOString(),
+    cancelled: false,
+    abort: null,
+  };
+  manufactureAllJobs.set(job.id, job);
+  pruneManufactureAllJobs();
+  runManufactureAllJob(job).catch((err) =>
+    console.error(`[manufacture-all] job ${job.id} runner failed:`, err)
+  );
+  return res.status(202).json(publicAllJob(job));
+});
+
+app.get("/api/manufacture-all/:jobId", (req, res) => {
+  const job = manufactureAllJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found — it may have been lost to a server restart." });
+  }
+  return res.json(publicAllJob(job));
+});
+
+app.delete("/api/manufacture-all/:jobId", (req, res) => {
+  const job = manufactureAllJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found." });
+  }
+  job.cancelled = true;
+  try {
+    job.abort?.abort();
+  } catch {
+    /* ignore */
+  }
+  return res.json({ success: true, jobId: job.id, status: job.status });
+});
+
+// 1c. Gumroad publishing (server-side only; GUMROAD_ACCESS_TOKEN never leaves the server).
+// Capability verified against Gumroad's official API docs (https://gumroad.com/api,
+// read 2026-09-21). Flow: POST /v2/files/presign -> PUT part bytes to the
+// presigned S3 URL -> POST /v2/files/complete -> POST /v2/products.
+// Products are created as UNPUBLISHED DRAFTS (draft=true) unless the caller
+// explicitly passes publish=true; the /products/:id/enable call that would make
+// a listing live is a separate, deliberate step. Requires the token to carry
+// the edit_products (or account) scope.
+const GUMROAD_API = "https://api.gumroad.com/v2";
+const GUMROAD_MAX_PDF_BYTES = 50 * 1024 * 1024; // presign parts are 100MB; one part covers our PDFs
+
+function gumroadToken(): string {
+  const token = process.env.GUMROAD_ACCESS_TOKEN;
+  if (!token) {
+    throw new Error(
+      "GUMROAD_ACCESS_TOKEN is not set on the server. Generate one in Gumroad: Settings > Advanced > Create application > Generate access token."
+    );
+  }
+  return token;
+}
+
+// POST a form-encoded call to the Gumroad v2 API. Supports repeated keys
+// (e.g. "files[][url]", "tags[]") via arrays. The official docs send the token
+// as an access_token form field; third-party live tests use a Bearer header —
+// send both.
+async function gumroadForm<T>(
+  path: string,
+  params: Record<string, string | string[]>,
+  opts?: { timeoutMs?: number }
+): Promise<T> {
+  const token = gumroadToken();
+  const body = new URLSearchParams();
+  body.set("access_token", token);
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value)) value.forEach((v) => body.append(key, v));
+    else body.set(key, value);
+  }
+  const res = await fetch(GUMROAD_API + path, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+    signal: AbortSignal.timeout(opts?.timeoutMs ?? 60000),
+  });
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok || data.success === false) {
+    // Note: Gumroad has been observed returning 404 (not 401) for invalid tokens.
+    const err: any = new Error(data?.message || `Gumroad API request failed (HTTP ${res.status}).`);
+    err.status = res.status;
+    throw err;
+  }
+  return data as T;
+}
+
+function parsePriceCents(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return Math.round(raw * 100);
+  const match = String(raw ?? "").match(/[\d,]+(?:\.\d{1,2})?/);
+  if (!match) return null;
+  const value = parseFloat(match[0].replace(/,/g, ""));
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 100);
+}
+
+function slugifyTitle(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return slug || "dropkit-product";
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function buildGumroadDescription(item: any): string {
+  const parts = [item?.gumroadBlurb, item?.listingDescription]
+    .filter((s) => s && String(s).trim())
+    .map((s) => String(s).trim());
+  const unique = [...new Set(parts)];
+  const html = unique.map((p) => `<p>${escapeHtml(p).replace(/\n+/g, "<br/>")}</p>`).join("");
+  return html || "<p>Digital download product.</p>";
+}
+
+app.post("/api/gumroad/publish", rateLimit, async (req, res) => {
+  try {
+    if (!process.env.GUMROAD_ACCESS_TOKEN) {
+      return res.status(400).json({
+        error:
+          "Gumroad publishing is not connected. Add GUMROAD_ACCESS_TOKEN to the server environment (Gumroad: Settings > Advanced > Create application > Generate access token), then try again.",
+      });
+    }
+    const { item, pdfBase64, publish } = (req.body || {}) as {
+      item?: any;
+      pdfBase64?: string;
+      publish?: boolean;
+    };
+    const title = String(item?.productTitle || "").trim();
+    if (!title) return res.status(400).json({ error: "A product title is required." });
+    if (!pdfBase64 || typeof pdfBase64 !== "string") {
+      return res.status(400).json({ error: "A PDF file is required." });
+    }
+    const pdfBytes = Buffer.from(pdfBase64, "base64");
+    if (pdfBytes.length === 0 || pdfBytes.length > GUMROAD_MAX_PDF_BYTES) {
+      return res.status(400).json({ error: "The PDF must be between 1 byte and 50 MB." });
+    }
+    if (pdfBytes.subarray(0, 4).toString("latin1") !== "%PDF") {
+      return res.status(400).json({ error: "The uploaded file is not a PDF." });
+    }
+    const priceCents = parsePriceCents(item?.priceRecommendationValue);
+    if (priceCents === null) {
+      return res.status(400).json({ error: "Could not parse a price from the item's recommended price." });
+    }
+
+    const filename = `${slugifyTitle(title)}.pdf`;
+
+    // 1. Presign the multipart upload.
+    const presign = await gumroadForm<any>("/files/presign", {
+      filename,
+      file_size: String(pdfBytes.length),
+    });
+    const parts: Array<{ part_number: number; presigned_url: string }> = presign.parts || [];
+    if (!presign.upload_id || !presign.key || parts.length === 0) {
+      throw new Error("Gumroad did not return a file upload session.");
+    }
+
+    // 2. PUT each part's bytes to its presigned S3 URL, capturing the ETag.
+    const partSize = Math.ceil(pdfBytes.length / parts.length);
+    const etags: Array<{ part_number: number; etag: string }> = [];
+    try {
+      for (const part of parts) {
+        const start = (part.part_number - 1) * partSize;
+        const chunk = pdfBytes.subarray(start, Math.min(start + partSize, pdfBytes.length));
+        const upload = await fetch(part.presigned_url, {
+          method: "PUT",
+          headers: { "Content-Type": "application/pdf", "Content-Length": String(chunk.length) },
+          body: chunk,
+          signal: AbortSignal.timeout(5 * 60 * 1000),
+        });
+        if (!upload.ok) throw new Error(`File upload to Gumroad storage failed (HTTP ${upload.status}).`);
+        const etag = upload.headers.get("etag");
+        if (!etag) throw new Error("Gumroad storage did not return an ETag for the uploaded part.");
+        etags.push({ part_number: part.part_number, etag });
+      }
+    } catch (err) {
+      // Best-effort abort of the multipart session; the upload_id is single-use.
+      try {
+        await gumroadForm("/files/abort", { upload_id: presign.upload_id, key: presign.key });
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+
+    // 3. Complete the upload -> canonical file_url (one-shot; do not retry).
+    const completePartNumbers: string[] = [];
+    const completePartEtags: string[] = [];
+    for (const e of etags) {
+      completePartNumbers.push(String(e.part_number));
+      completePartEtags.push(e.etag);
+    }
+    const complete = await gumroadForm<any>("/files/complete", {
+      upload_id: presign.upload_id,
+      key: presign.key,
+      "parts[][part_number]": completePartNumbers,
+      "parts[][etag]": completePartEtags,
+    });
+    const fileUrl: string | undefined = complete.file_url;
+    if (!fileUrl) throw new Error("Gumroad did not return a file URL for the uploaded PDF.");
+
+    // 4. Create the product — as a DRAFT unless explicit publish was requested.
+    const createParams: Record<string, string | string[]> = {
+      draft: publish === true ? "false" : "true",
+      native_type: "digital",
+      name: title.slice(0, 200),
+      price: String(priceCents),
+      price_currency_type: "usd",
+      description: buildGumroadDescription(item),
+      "files[][url]": [fileUrl],
+    };
+    const tags = Array.isArray(item?.etsyTags) ? item.etsyTags.filter(Boolean).slice(0, 10) : [];
+    if (tags.length > 0) createParams["tags[]"] = tags;
+    const created = await gumroadForm<any>("/products", createParams);
+    const product = created.product || {};
+    let published = Boolean(product.published);
+
+    // 5. Explicit publish is a separate deliberate step (not exposed in the UI).
+    if (publish === true && !published && product.id) {
+      const enabled = await gumroadForm<any>(
+        `/products/${encodeURIComponent(product.id)}/enable`,
+        {}
+      );
+      published = Boolean(enabled.product?.published ?? enabled.success);
+    }
+
+    return res.json({
+      success: true,
+      productId: product.id,
+      url: product.short_url || null,
+      published,
+      draft: !published,
+      warning: product.warning || null,
+    });
+  } catch (err: any) {
+    console.error("[gumroad] publish failed:", err.message);
+    const isAuth = err.status === 401 || err.status === 404;
+    return res.status(502).json({
+      error: isAuth
+        ? "Gumroad rejected the access token. Check that GUMROAD_ACCESS_TOKEN is valid and carries the edit_products scope."
+        : err.message || "Gumroad publishing failed.",
     });
   }
 });
@@ -835,7 +1343,6 @@ app.post("/api/archive/remove", (req, res) => {
 });
 
 // Trending Niches via Google Trends RSS + NVIDIA LLM (no Gemini required)
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 const NVIDIA_TRENDS_MODEL = process.env.NVIDIA_TRENDS_MODEL || "moonshotai/kimi-k3";
 
 interface TrendTopic { title: string; traffic: string; pubDate: string; }
@@ -921,16 +1428,36 @@ app.get("/api/trending-niches", rateLimit, requireQuota(), async (req, res) => {
 
 // Semantic Product Type Detection
 app.post("/api/detect-format", rateLimit, requireQuota(), async (req, res) => {
-  if (!geminiApiKey) {
-    return res.status(400).json({ error: "GEMINI_API_KEY is not defined." });
-  }
   const { niche } = req.body;
   if (!niche) return res.status(400).json({ error: "Niche is required." });
 
+  const detectPrompt = `Analyze the user's niche/request: "${niche}". Decide which of the following 6 digital product formats is the absolute best fit to create for this request: planner, prompts, templates, guide, checklist, swipe. Return ONLY a JSON object with 'format' string and 'reason' string.`;
+
   try {
+    if (LLM_PROVIDER !== "gemini") {
+      const providerKey = LLM_PROVIDER === "nvidia" ? NVIDIA_API_KEY : OPENAI_API_KEY;
+      if (!providerKey) {
+        return res.status(400).json({
+          error: `LLM_PROVIDER=${LLM_PROVIDER} requires ${LLM_PROVIDER === "nvidia" ? "NVIDIA_API_KEY" : "OPENAI_API_KEY"}.`,
+        });
+      }
+      const parsed = await openAiCompatibleJson({
+        baseUrl: LLM_PROVIDER === "nvidia" ? NVIDIA_BASE_URL : "https://api.openai.com/v1",
+        apiKey: providerKey,
+        model: LLM_PROVIDER === "nvidia" ? NVIDIA_MODEL : OPENAI_MODEL,
+        label: `${LLM_PROVIDER} detect-format`,
+        system: "You are a digital product format classifier.",
+        user: detectPrompt,
+        call: { timeoutMs: 60000 },
+      });
+      return res.json(parsed);
+    }
+    if (!geminiApiKey) {
+      return res.status(400).json({ error: "GEMINI_API_KEY is not defined." });
+    }
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
-      contents: `Analyze the user's niche/request: "${niche}". Decide which of the following 6 digital product formats is the absolute best fit to create for this request: planner, prompts, templates, guide, checklist, swipe. Return ONLY a JSON object with 'format' string and 'reason' string.`,
+      contents: detectPrompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -960,14 +1487,31 @@ app.post("/api/detect-format", rateLimit, requireQuota(), async (req, res) => {
 
 // Semantic Tags Suggestion
 app.post("/api/suggest-tags", rateLimit, async (req, res) => {
-  if (!geminiApiKey) return res.status(400).json({ error: "No API key" });
   const { query } = req.body;
   if (!query) return res.json({ tags: [] });
 
+  const tagsPrompt = `Given the target audience or niche: "${query}", suggest 5 relevant secondary keywords or related micro-niches that the user could target. Return JSON with 'tags' array of strings. Keep them under 3 words each.`;
+
   try {
+    if (LLM_PROVIDER !== "gemini") {
+      const providerKey = LLM_PROVIDER === "nvidia" ? NVIDIA_API_KEY : OPENAI_API_KEY;
+      if (!providerKey) return res.json({ tags: [] });
+      const parsed = await openAiCompatibleJson({
+        baseUrl: LLM_PROVIDER === "nvidia" ? NVIDIA_BASE_URL : "https://api.openai.com/v1",
+        apiKey: providerKey,
+        model: LLM_PROVIDER === "nvidia" ? NVIDIA_MODEL : OPENAI_MODEL,
+        label: `${LLM_PROVIDER} suggest-tags`,
+        system: "You suggest related micro-niches. Respond with JSON only.",
+        user: tagsPrompt,
+        call: { timeoutMs: 60000 },
+      });
+      return res.json({ tags: Array.isArray(parsed?.tags) ? parsed.tags : [] });
+    }
+    if (!geminiApiKey) return res.status(400).json({ error: "No API key" });
+
     const response = await ai.models.generateContent({
       model: "gemini-3.1-flash-lite",
-      contents: `Given the target audience or niche: "${query}", suggest 5 relevant secondary keywords or related micro-niches that the user could target. Return JSON with 'tags' array of strings. Keep them under 3 words each.`,
+      contents: tagsPrompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: {

@@ -3,6 +3,8 @@
 // on the server (the default), fetchBillingConfig() returns enabled:false and the
 // UI never surfaces any of this — the app behaves exactly as before.
 
+import { parseJsonResponse } from "./http";
+
 const KEY_STORAGE = "dropkit_api_key";
 
 export interface BillingPlan {
@@ -57,7 +59,7 @@ export async function fetchBillingConfig(): Promise<BillingConfig | null> {
   try {
     const res = await fetch("/api/billing/config");
     if (!res.ok) return null;
-    return (await res.json()) as BillingConfig;
+    return (await parseJsonResponse(res)) as BillingConfig;
   } catch {
     return null;
   }
@@ -69,7 +71,7 @@ export async function signup(email?: string): Promise<{ account: AccountInfo; wa
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email }),
   });
-  const data = await res.json();
+  const data = await parseJsonResponse(res);
   if (!res.ok) throw new Error(data.error || "Sign up failed.");
   setApiKey(data.account.apiKey);
   return data;
@@ -85,7 +87,7 @@ export async function fetchAccount(): Promise<AccountInfo | null> {
     return null;
   }
   if (!res.ok) return null;
-  const data = await res.json();
+  const data = await parseJsonResponse(res);
   return data.account as AccountInfo;
 }
 
@@ -95,7 +97,7 @@ export async function startCheckout(plan: string): Promise<string> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ plan }),
   });
-  const data = await res.json();
+  const data = await parseJsonResponse(res);
   if (!res.ok) throw new Error(data.error || "Could not start checkout.");
   return data.url as string;
 }
@@ -106,7 +108,7 @@ export async function openPortal(): Promise<string> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({}),
   });
-  const data = await res.json();
+  const data = await parseJsonResponse(res);
   if (!res.ok) throw new Error(data.error || "Could not open billing portal.");
   return data.url as string;
 }

@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ArchiveStats } from "./ArchiveStats";
 import { ManufactureResult } from "../types";
 import { ETSY_PROMPT_PACK_NOTICE } from "../types";
-import { Download, Trash2, Eye, FileText, FileDown, FileUp, List, Package, Image as ImageIcon, Loader2 } from "lucide-react";
+import { Download, Trash2, Eye, FileText, FileDown, FileUp, List, Package, Image as ImageIcon, Loader2, ExternalLink } from "lucide-react";
 import { PDFViewerModal } from "./PDFViewerModal";
-import { exportProductPdf, exportBatchPdf, exportProductTxt, exportProductHtml } from "../lib/export";
+import { exportProductPdf, exportBatchPdf, exportProductTxt, exportProductHtml, buildProductPdf } from "../lib/export";
 import { exportSalesKit, exportArchiveZip } from "../lib/salesKit";
 import { parseJsonResponse } from "../lib/http";
 import { authHeaders } from "../lib/billingClient";
@@ -34,6 +34,67 @@ export function ArchiveView({
   const [viewingPdfItem, setViewingPdfItem] = useState<ManufactureResult | null>(null);
   const [coverBusy, setCoverBusy] = useState<number | null>(null);
   const [kitBusy, setKitBusy] = useState<number | null>(null);
+
+  // Gumroad publishing: per-item idle/working/success/error state.
+  const [gumroadBusy, setGumroadBusy] = useState<number | null>(null);
+  const [gumroadState, setGumroadState] = useState<
+    Record<number, { url?: string | null; published?: boolean; warning?: string | null; error?: string }>
+  >({});
+  const [gumroadReady, setGumroadReady] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((d) => setGumroadReady(Boolean(d?.hasGumroadToken)))
+      .catch(() => setGumroadReady(false));
+  }, []);
+
+  const publishToGumroad = async (idx: number, item: ManufactureResult) => {
+    setGumroadBusy(idx);
+    setGumroadState((s) => ({ ...s, [idx]: {} }));
+    try {
+      // Build the PDF with the existing client-side builder, then hand the
+      // bytes to the server — the access token never leaves the server.
+      const doc = buildProductPdf(item, watermarkText);
+      const buffer = doc.output("arraybuffer") as ArrayBuffer;
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)) as number[]);
+      }
+      const pdfBase64 = btoa(binary);
+      const res = await fetch("/api/gumroad/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          item: {
+            productTitle: item.productTitle,
+            productId: item.productId,
+            originalNiche: item.originalNiche,
+            gumroadBlurb: item.gumroadBlurb,
+            listingDescription: item.listingDescription,
+            priceRecommendationValue: item.priceRecommendationValue,
+            etsyTags: item.etsyTags,
+          },
+          pdfBase64,
+        }),
+        signal: AbortSignal.timeout(180000),
+      });
+      const data = await parseJsonResponse(res);
+      if (!res.ok) throw new Error(data.error || "Gumroad publishing failed.");
+      setGumroadState((s) => ({
+        ...s,
+        [idx]: { url: data.url, published: data.published, warning: data.warning },
+      }));
+      await markListed(idx, "gumroad");
+      trackEvent("gumroad_publish", { product: item.productId || "unknown", draft: data.draft });
+    } catch (err: any) {
+      setGumroadState((s) => ({ ...s, [idx]: { error: err.message || "Gumroad publishing failed." } }));
+    } finally {
+      setGumroadBusy(null);
+    }
+  };
 
   const handleDownloadPDF = (item: ManufactureResult) => {
     exportProductPdf(item, { watermarkText, niche: item.originalNiche || "" });
@@ -238,6 +299,39 @@ export function ArchiveView({
                   <button onClick={() => markSale(idx)} className="text-[10px] uppercase tracking-wider border border-gray-200 px-2 py-1 rounded hover:bg-gray-50">
                     {item.listingOutcome?.saleNoted ? "Sale noted" : "I made a sale"}
                   </button>
+                </div>
+                <div className="mt-4">
+                  {gumroadState[idx]?.url ? (
+                    <a
+                      href={gumroadState[idx].url!}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full px-4 py-2.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      {gumroadState[idx].published ? "Live on Gumroad — view" : "Draft created — review on Gumroad"}
+                    </a>
+                  ) : (
+                    <button
+                      onClick={() => publishToGumroad(idx, item)}
+                      disabled={gumroadBusy === idx || gumroadReady === false}
+                      className="w-full px-4 py-2.5 bg-gray-900 text-white rounded-lg text-xs font-medium hover:bg-gray-800 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                    >
+                      {gumroadBusy === idx && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {gumroadBusy === idx ? "Creating Gumroad draft…" : "Publish to Gumroad (draft)"}
+                    </button>
+                  )}
+                  {gumroadState[idx]?.error && (
+                    <p className="text-xs text-red-600 mt-2">{gumroadState[idx].error}</p>
+                  )}
+                  {gumroadState[idx]?.warning && (
+                    <p className="text-[11px] text-amber-700 mt-2">{gumroadState[idx].warning}</p>
+                  )}
+                  {gumroadReady === false && !gumroadState[idx]?.url && (
+                    <p className="text-[11px] text-gray-400 mt-2">
+                      Gumroad isn't connected on the server yet — add GUMROAD_ACCESS_TOKEN to enable one-tap drafts.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center justify-between pt-4 border-t border-gray-100">
                   <span className="text-xs font-mono text-gray-400 bg-gray-100 px-2 py-1 rounded">

@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { PRODUCTS, LANGUAGES, PRESET_NICHES } from "./constants";
 import { ProductType, ManufactureResult } from "./types";
 import { ArchiveView } from "./components/ArchiveView";
 import { Header } from "./components/Header";
 import { QueueView } from "./components/QueueView";
 import { Billing } from "./components/Billing";
-import { Sparkles, Check, AlertCircle, Brain, Globe, Loader2, ArrowRight } from "lucide-react";
+import { Sparkles, Check, AlertCircle, Brain, Globe, Loader2, ArrowRight, LayoutGrid } from "lucide-react";
 import { auth, signInWithGoogle, logout, db } from "./firebase";
 import { useAuthState } from "react-firebase-hooks/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
@@ -17,6 +17,28 @@ import { ARCHIVE_KEY, upsertArchiveItem } from "./lib/archive";
 import { authHeaders, fetchAccount, fetchBillingConfig, type AccountInfo, type BillingConfig } from "./lib/billingClient";
 
 type View = "manufacture" | "archive" | "queue" | "pricing";
+
+const ALL_FORMATS: ProductType = {
+  id: "all",
+  ico: <LayoutGrid className="w-5 h-5" />,
+  name: "All Formats",
+  code: "6 products at once",
+  spec: "Generate every format — planner, prompts, templates, guide, checklist and swipe file — for your niche in one run.",
+};
+
+type AllFormatProgressStatus = "pending" | "working" | "done" | "error";
+interface AllFormatProgress {
+  productId: string;
+  name: string;
+  status: AllFormatProgressStatus;
+  error?: string;
+}
+interface AllFormatsJobState {
+  jobId: string;
+  niche: string;
+  status: "running" | "completed" | "cancelled";
+  formats: AllFormatProgress[];
+}
 
 export default function App() {
   const [user, loadingAuth] = useAuthState(auth);
@@ -48,6 +70,15 @@ export default function App() {
 
   const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null);
   const [billingAccount, setBillingAccount] = useState<AccountInfo | null>(null);
+
+  // All-formats background job (progress + cancel for the 6-format run).
+  const [allFormatsJob, setAllFormatsJob] = useState<AllFormatsJobState | null>(null);
+  const allFormatsJobRef = useRef<AllFormatsJobState | null>(null);
+  const allJobCancelledRef = useRef(false);
+  const setJobState = (job: AllFormatsJobState | null) => {
+    allFormatsJobRef.current = job;
+    setAllFormatsJob(job);
+  };
 
   useEffect(() => {
     fetchBillingConfig().then((cfg) => {
@@ -220,6 +251,7 @@ export default function App() {
     setError(null);
     setLoading(true);
     setBatchResults([]);
+    setJobState(null);
     trackEvent("tool_start", { tool: "asset_manufacturer", product: selectedProduct.id, batch_size: niches.length });
 
     const newResults: ManufactureResult[] = [];
@@ -228,12 +260,80 @@ export default function App() {
 
     for (const currentNiche of niches) {
       try {
+        const productsToMake = selectedProduct.id === "all" ? PRODUCTS : [selectedProduct];
         if (!hasRemoteApi) {
-          const result = manufactureLocally(selectedProduct, currentNiche, angle, language);
-          newResults.push(result);
+          for (const p of productsToMake) {
+            const result = manufactureLocally(p, currentNiche, angle, language);
+            newResults.push(result);
+            archive = upsertArchiveItem(archive, result);
+          }
           setBatchResults([...newResults]);
-          archive = upsertArchiveItem(archive, result);
           await saveArchiveState(archive);
+          continue;
+        }
+        if (selectedProduct.id === "all") {
+          // Start a background job, then poll for per-format progress.
+          const response = await fetch("/api/manufacture-all", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+              niche: currentNiche,
+              angle: angle.trim() || undefined,
+              language: language !== "English" ? language : undefined,
+            }),
+            signal: AbortSignal.timeout(30000),
+          });
+          const startData = await parseJsonResponse(response);
+          if (!response.ok) throw new Error(startData.error || `Failed to start all-format generation for: ${currentNiche}`);
+          const jobId: string = startData.jobId;
+          allJobCancelledRef.current = false;
+          setJobState({
+            jobId,
+            niche: currentNiche,
+            status: "running",
+            formats: (startData.formats || []).map((f: any) => ({
+              productId: f.productId,
+              name: f.name,
+              status: f.status as AllFormatProgressStatus,
+            })),
+          });
+          const archivedKeys = new Set<string>();
+          let finalFormats: AllFormatProgress[] = [];
+          for (;;) {
+            await new Promise((r) => setTimeout(r, 2500));
+            if (allJobCancelledRef.current) break;
+            const pollRes = await fetch(`/api/manufacture-all/${encodeURIComponent(jobId)}`, {
+              signal: AbortSignal.timeout(20000),
+            });
+            const pollData = await parseJsonResponse(pollRes);
+            if (!pollRes.ok) throw new Error(pollData.error || "Lost contact with the generation job.");
+            for (const item of pollData.results || []) {
+              const key = `${item.productId}::${item.productTitle}`;
+              if (archivedKeys.has(key)) continue;
+              archivedKeys.add(key);
+              const result: ManufactureResult = { ...item, originalNiche: currentNiche, productId: item.productId };
+              newResults.push(result);
+              archive = upsertArchiveItem(archive, result);
+            }
+            setBatchResults([...newResults]);
+            await saveArchiveState(archive);
+            finalFormats = (pollData.formats || []).map((f: any) => ({
+              productId: f.productId,
+              name: f.name,
+              status: f.status as AllFormatProgressStatus,
+              error: f.error,
+            }));
+            setJobState({ jobId, niche: currentNiche, status: pollData.status, formats: finalFormats });
+            if (pollData.status === "completed" || pollData.status === "cancelled") break;
+          }
+          for (const f of finalFormats) {
+            if (f.status === "error") {
+              failures.push(`${currentNiche} [${f.productId}]: ${f.error || "failed"}`);
+            }
+          }
+          if (allJobCancelledRef.current) {
+            trackEvent("tool_cancel", { tool: "asset_manufacturer", product: "all" });
+          }
           continue;
         }
         const response = await fetch("/api/manufacture", {
@@ -255,10 +355,13 @@ export default function App() {
         await saveArchiveState(archive);
       } catch (err: any) {
         try {
-          const result = manufactureLocally(selectedProduct, currentNiche, angle, language);
-          newResults.push(result);
+          const productsToMake = selectedProduct.id === "all" ? PRODUCTS : [selectedProduct];
+          for (const p of productsToMake) {
+            const result = manufactureLocally(p, currentNiche, angle, language);
+            newResults.push(result);
+            archive = upsertArchiveItem(archive, result);
+          }
           setBatchResults([...newResults]);
-          archive = upsertArchiveItem(archive, result);
           await saveArchiveState(archive);
         } catch {
           failures.push(`${currentNiche}: ${err.message || "failed"}`);
@@ -289,24 +392,43 @@ export default function App() {
     setQueueing(true);
     setError(null);
     try {
-      const res = await fetch("/api/queue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
-          productId: selectedProduct.id,
-          niches,
-          angle: angle.trim() || undefined,
-          language,
-        }),
-      });
-      const data = await parseJsonResponse(res);
-      if (!res.ok) throw new Error(data.error || "Failed to queue jobs.");
+      const productsToQueue = selectedProduct.id === "all" ? PRODUCTS : [selectedProduct];
+      for (const p of productsToQueue) {
+        const res = await fetch("/api/queue", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            productId: p.id,
+            niches,
+            angle: angle.trim() || undefined,
+            language,
+          }),
+        });
+        const data = await parseJsonResponse(res);
+        if (!res.ok) throw new Error(data.error || "Failed to queue jobs.");
+      }
       setView("queue");
     } catch (err: any) {
       setError(err.message);
     } finally {
       setQueueing(false);
     }
+  };
+
+  const cancelAllFormatsJob = async () => {
+    const job = allFormatsJobRef.current;
+    if (!job || job.status !== "running") return;
+    allJobCancelledRef.current = true;
+    try {
+      await fetch(`/api/manufacture-all/${encodeURIComponent(job.jobId)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      /* best effort — the poll loop already stopped */
+    }
+    setJobState({ ...job, status: "cancelled" });
   };
 
   const toggleArchiveSelection = (idx: number) => {
@@ -406,6 +528,23 @@ export default function App() {
                       <p className="text-xs text-gray-500 leading-relaxed">{p.spec}</p>
                     </button>
                   ))}
+                  <button
+                    key="all"
+                    onClick={() => setSelectedProduct(ALL_FORMATS)}
+                    className={`text-left p-6 rounded-xl transition-all border ${
+                      selectedProduct.id === "all"
+                        ? "border-emerald-500 bg-emerald-50/50 ring-1 ring-emerald-500"
+                        : "border-emerald-200 hover:border-emerald-400 hover:bg-emerald-50/50"
+                    }`}
+                  >
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center mb-4 ${
+                      selectedProduct.id === "all" ? "bg-emerald-500 text-white" : "bg-emerald-100 text-emerald-700"
+                    }`}>
+                      {ALL_FORMATS.ico}
+                    </div>
+                    <h4 className="font-semibold text-gray-900 mb-1">{ALL_FORMATS.name}</h4>
+                    <p className="text-xs text-gray-500 leading-relaxed">{ALL_FORMATS.spec}</p>
+                  </button>
                 </div>
               </div>
 
@@ -582,6 +721,84 @@ export default function App() {
                 )}
               </div>
             </div>
+
+            {allFormatsJob && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 sm:p-8 mb-12">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {allFormatsJob.status === "running"
+                        ? "Generating all formats…"
+                        : allFormatsJob.status === "cancelled"
+                          ? "Run cancelled"
+                          : "All formats complete"}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {allFormatsJob.niche} · {allFormatsJob.formats.filter((f) => f.status === "done").length} of{" "}
+                      {allFormatsJob.formats.length} finished
+                    </p>
+                  </div>
+                  {allFormatsJob.status === "running" ? (
+                    <button
+                      onClick={cancelAllFormatsJob}
+                      className="px-5 py-2.5 border border-red-200 text-red-600 rounded-xl text-sm font-medium hover:bg-red-50 shrink-0"
+                    >
+                      Cancel run
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setView("archive")}
+                      className="px-5 py-2.5 bg-gray-900 text-white rounded-xl text-sm font-medium hover:bg-gray-800 flex items-center gap-2 shrink-0"
+                    >
+                      View in Archive <ArrowRight className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+                <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-6">
+                  <div
+                    className="h-full bg-emerald-500 transition-all duration-500"
+                    style={{
+                      width: `${(allFormatsJob.formats.filter((f) => f.status === "done" || f.status === "error").length / Math.max(allFormatsJob.formats.length, 1)) * 100}%`,
+                    }}
+                  />
+                </div>
+                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {allFormatsJob.formats.map((f, idx) => (
+                    <li key={f.productId} className="flex items-center gap-3 p-3 rounded-xl border border-gray-100">
+                      {f.status === "done" ? (
+                        <span className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                          <Check className="w-4 h-4" />
+                        </span>
+                      ) : f.status === "working" ? (
+                        <span className="w-8 h-8 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        </span>
+                      ) : f.status === "error" ? (
+                        <span className="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                          <AlertCircle className="w-4 h-4" />
+                        </span>
+                      ) : (
+                        <span className="w-8 h-8 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center shrink-0 text-xs font-semibold">
+                          {idx + 1}
+                        </span>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">{f.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {f.status === "done"
+                            ? "Done"
+                            : f.status === "working"
+                              ? "Generating…"
+                              : f.status === "error"
+                                ? f.error || "Failed"
+                                : "Waiting"}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {batchResults.length > 0 && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 text-center">
