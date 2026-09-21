@@ -834,83 +834,89 @@ app.post("/api/archive/remove", (req, res) => {
   }
 });
 
-// Trending Niches using Google Search integration via Gemini
-app.get("/api/trending-niches", rateLimit, requireQuota(), async (req, res) => {
-  if (!geminiApiKey) {
-    return res.status(400).json({ error: "GEMINI_API_KEY is not defined. Please verify your Secrets in Settings > Secrets." });
+// Trending Niches via Google Trends RSS + NVIDIA LLM (no Gemini required)
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+const NVIDIA_TRENDS_MODEL = process.env.NVIDIA_TRENDS_MODEL || "moonshotai/kimi-k3";
+
+interface TrendTopic { title: string; traffic: string; pubDate: string; }
+
+async function fetchGoogleTrendsTopics(limit = 12): Promise<TrendTopic[]> {
+  const rssUrl = "https://trends.google.com/trending/rss?geo=US";
+  const resp = await fetch(rssUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; Dropfable/1.0)" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!resp.ok) throw new Error(`Google Trends RSS returned HTTP ${resp.status}`);
+  const xml = await resp.text();
+  const items: TrendTopic[] = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/g;
+  let m: RegExpExecArray | null;
+  while ((m = itemRe.exec(xml)) && items.length < limit) {
+    const body = m[1];
+    const title = (body.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "").trim();
+    const traffic = (body.match(/<ht:approx_traffic>([\s\S]*?)<\/ht:approx_traffic>/)?.[1] || "").trim();
+    const pubDate = (body.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1] || "").trim();
+    if (title) items.push({ title, traffic, pubDate });
   }
+  if (!items.length) throw new Error("No trending topics found in Google Trends feed.");
+  return items;
+}
 
+function templateTrendsFromTopics(topics: TrendTopic[], query: string) {
+  return topics.slice(0, 5).map((t) => ({
+    niche: t.title,
+    whyTrending: `Trending on Google US${t.traffic ? ` with ${t.traffic} searches` : ""}${t.pubDate ? ` (${t.pubDate})` : ""}. Relevant to "${query}".`,
+    exampleConcept: `30-Day ${t.title} Planner`,
+  }));
+}
+
+async function nvidiaTrendsFromTopics(topics: TrendTopic[], query: string) {
+  const topicList = topics.map((t, i) => `${i + 1}. ${t.title}${t.traffic ? ` (${t.traffic} searches)` : ""}`).join("\n");
+  const resp = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${NVIDIA_API_KEY}` },
+    body: JSON.stringify({
+      model: NVIDIA_TRENDS_MODEL,
+      messages: [
+        { role: "system", content: "You are a digital-product niche researcher. Reply with ONLY a JSON array, no markdown fences, no commentary." },
+        { role: "user", content: `These topics are trending on Google US right now:\n${topicList}\n\nUser focus: "${query}".\n\nIdentify 5 highly relevant, specific, realistic digital-product niches inspired by these trends. For each return an object with exactly these keys: "niche" (short audience/topic name), "whyTrending" (one sentence tying it to the trend), "exampleConcept" (one concrete digital product idea, e.g. "30-Day Email Marketing Planner"). Do not return placeholders.` },
+      ],
+      temperature: 0.7,
+      max_tokens: 1200,
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`NVIDIA API returned HTTP ${resp.status}${txt ? `: ${txt.slice(0, 200)}` : ""}`);
+  }
+  const data: any = await resp.json();
+  const content = (data?.choices?.[0]?.message?.content || "").trim();
+  const jsonStr = content.replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+  const parsed = JSON.parse(jsonStr);
+  if (!Array.isArray(parsed) || !parsed.length) throw new Error("NVIDIA API returned no trends.");
+  return parsed;
+}
+
+app.get("/api/trending-niches", rateLimit, requireQuota(), async (req, res) => {
   const query = (req.query.q as string) || "currently trending digital product niches 2026";
-  
-  const searchModels = getOrderedModels([
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash-8b"
-  ]);
-
-  let lastError: any = null;
-
-  for (const modelName of searchModels) {
-    try {
-      console.log(`[Trends] Querying trends with model ${modelName} for search: "${query}"`);
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: `Use Google Search to analyze and identify 5 highly relevant, active, and real-time trending digital product niches right now based on this user query: "${query}". Ensure the niches are specific, realistic, and highly lucrative for digital creators. For each niche, provide the primary niche name (e.g. "Shopify Dropshippers" or "Aesthetic Notion Creators"), a brief explanation of why it is currently trending/in-demand, and an example product concept (e.g. "30-Day Email Marketing Planner"). Do not return placeholders.`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                niche: { type: Type.STRING },
-                whyTrending: { type: Type.STRING },
-                exampleConcept: { type: Type.STRING },
-              },
-              required: ["niche", "whyTrending", "exampleConcept"],
-            },
-          },
-          tools: [{ googleSearch: {} }],
-        },
-      });
-
-      const text = response.text;
-      if (text) {
-        const parsed = JSON.parse(text);
-        return res.json({ success: true, trends: parsed, modelUsed: modelName });
-      }
-    } catch (err: any) {
-      console.warn(`[Trends] Failed with model ${modelName}:`, err.message || err);
-      lastError = err;
-      
-      const errorMessage = err.message || "";
-      const isTransient = errorMessage.includes("503") || 
-                          err.status === 503 || 
-                          errorMessage.includes("429") ||
-                          errorMessage.includes("UNAVAILABLE") ||
-                          errorMessage.includes("high demand") ||
-                          errorMessage.includes("overloaded");
-      if (isTransient) {
-        markModelFailure(modelName, 5);
+  try {
+    console.log(`[Trends] Fetching Google Trends for: "${query}"`);
+    const topics = await fetchGoogleTrendsTopics(12);
+    if (NVIDIA_API_KEY) {
+      try {
+        const trends = await nvidiaTrendsFromTopics(topics, query);
+        return res.json({ success: true, trends, modelUsed: `nvidia/${NVIDIA_TRENDS_MODEL}`, source: "google-trends" });
+      } catch (llmErr: any) {
+        console.warn("[Trends] NVIDIA enrichment failed, using template fallback:", llmErr.message || llmErr);
       }
     }
+    const trends = templateTrendsFromTopics(topics, query);
+    return res.json({ success: true, trends, modelUsed: "template", source: "google-trends", note: "Set NVIDIA_API_KEY for AI-enriched niche ideas." });
+  } catch (err: any) {
+    console.warn("[Trends] Failed:", err.message || err);
+    return res.status(502).json({ error: "Trend lookup is temporarily unavailable. Please try again." });
   }
-
-  const errorMessage = lastError?.message || "";
-  if (errorMessage.includes("quota") || lastError?.status === 429 || errorMessage.includes("429")) {
-    return res.status(429).json({ error: "You have exceeded your Gemini API quota. Please check your Google AI Studio plan and billing details." });
-  }
-  if (errorMessage.includes("UNAUTHENTICATED") || errorMessage.includes("ACCOUNT_STATE_INVALID") || lastError?.status === 401 || errorMessage.includes("401")) {
-    return res.status(401).json({ error: "The provided GEMINI_API_KEY is invalid or disabled. Please verify your Secrets in Settings > Secrets." });
-  }
-
-  return res.status(500).json({ 
-    error: lastError?.message || "Failed to retrieve trending niches using Google Search integration." 
-  });
 });
 
 // Semantic Product Type Detection
